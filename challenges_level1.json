@@ -1,0 +1,242 @@
+[
+  {
+    "id": 1,
+    "title": "Ethical Hacking Scope",
+    "prompt": "A written authorization defines the target as 10.10.20.0/24. What token should be recorded as the scope identifier?\n\nLAB EVIDENCE:\nAuthorization note: approved target range is 10.10.20.0/24; no other hosts are in scope.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{scope_10_10_20_0_24}",
+    "category": "Scenario analysis",
+    "points": 100
+  },
+  {
+    "id": 2,
+    "title": "Passive Reconnaissance",
+    "prompt": "Identify the reconnaissance method that does not directly interact with the target systems.\n\nLAB EVIDENCE:\nActivity log: analyst reviewed public search results and public DNS records; no packets were sent to the target.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{passive_recon}",
+    "category": "Footprinting",
+    "points": 100
+  },
+  {
+    "id": 3,
+    "title": "Honeypot Recognition",
+    "prompt": "A network sensor observes a host with no legitimate business owner exposing fake SSH and database banners. Connections are logged and no production data is present. Identify the defensive decoy system.\n\nLAB EVIDENCE:\nAsset inventory marks 192.0.2.77 as a decoy host created to attract, monitor, and study unauthorized activity.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{honeypot}",
+    "category": "IDS, Firewalls and Honeypots",
+    "points": 100
+  },
+  {
+    "id": 4,
+    "title": "Network Scan Interpretation",
+    "prompt": "Submit the service name listening on TCP port 22.\n\nLAB EVIDENCE:\nAuthorized scan excerpt: 22/tcp open ssh; 80/tcp open http; 443/tcp open https.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{ssh}",
+    "category": "Scanning",
+    "points": 100
+  },
+  {
+    "id": 5,
+    "title": "Service Enumeration",
+    "prompt": "Submit the product family named in the banner.\n\nLAB EVIDENCE:\nBanner excerpt: Server: Apache/2.4.57 (Unix).\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{apache}",
+    "category": "Enumeration",
+    "points": 100
+  },
+  {
+    "id": 6,
+    "title": "SMB Enumeration",
+    "prompt": "What protocol family is being enumerated?\n\nLAB EVIDENCE:\nEnumeration output: host 192.0.2.20 exposes SMB shares over TCP/445.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{smb}",
+    "category": "Enumeration",
+    "points": 100
+  },
+  {
+    "id": 7,
+    "title": "Vulnerability Severity",
+    "prompt": "A finding has CVSS base score 9.8. Submit the severity label commonly associated with this score.\n\nLAB EVIDENCE:\nValidated finding: CVSS v3.1 base score = 9.8.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{critical}",
+    "category": "Vulnerability Analysis",
+    "points": 100
+  },
+  {
+    "id": 8,
+    "title": "Patch Validation",
+    "prompt": "After a patch is applied, which action confirms the original issue is no longer reproducible?\n\nLAB EVIDENCE:\nChange record: patch deployed to staging; the original test case must be run again against the patched build.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{retest}",
+    "category": "Vulnerability Analysis",
+    "points": 100
+  },
+  {
+    "id": 9,
+    "title": "Password Storage",
+    "prompt": "Which one-way password hashing algorithm is recommended here by the policy?\n\nLAB EVIDENCE:\nSecurity standard excerpt: use Argon2id for new password hashes, with a unique salt and tuned work factor.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{argon2id}",
+    "category": "System Security",
+    "points": 100
+  },
+  {
+    "id": 10,
+    "title": "Least Privilege",
+    "prompt": "A user only needs read access to one report. Submit the security principle that says permissions should be limited to what is necessary.\n\nLAB EVIDENCE:\nRole matrix: analyst needs read access to /reports/monthly.pdf and no administrative actions.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{least_privilege}",
+    "category": "System Hacking",
+    "points": 100
+  },
+  {
+    "id": 11,
+    "title": "Malware Analysis Safety",
+    "prompt": "A suspicious executable must be examined without risking the host. Submit the isolated environment type used for this purpose.\n\nLAB EVIDENCE:\nIncident note: unknown executable must be observed without access to the analyst workstation or production network.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{sandbox}",
+    "category": "Malware Threats",
+    "points": 100
+  },
+  {
+    "id": 12,
+    "title": "File Hashing",
+    "prompt": "submit the algorithm name used to produce a 256-bit digest.\n\nLAB EVIDENCE:\nEvidence note: the supplied digest is 64 hexadecimal characters and is labeled as a 256-bit SHA-2 digest.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{sha256}",
+    "category": "Malware Threats",
+    "points": 100
+  },
+  {
+    "id": 13,
+    "title": "Packet Capture",
+    "prompt": "Submit the protocol commonly used for resolving a domain name to an IP address.\n\nLAB EVIDENCE:\nPacket summary: client asks a recursive resolver for the address associated with portal.example.test.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{dns}",
+    "category": "Sniffing",
+    "points": 100
+  },
+  {
+    "id": 14,
+    "title": "Cleartext Credential Risk",
+    "prompt": "A packet capture shows credentials sent without transport encryption. Submit the main confidentiality risk in one token.\n\nLAB EVIDENCE:\nCapture excerpt: username and password are visible in the payload because the connection is not encrypted.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{cleartext_exposure}",
+    "category": "Sniffing",
+    "points": 100
+  },
+  {
+    "id": 15,
+    "title": "Social Engineering Defense",
+    "prompt": "A caller pressures an employee to disclose an MFA code. Submit the control the employee should never bypass.\n\nLAB EVIDENCE:\nCall transcript: caller asks an employee to read out a one-time MFA code and says the request is urgent.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{mfa_policy}",
+    "category": "Social Engineering",
+    "points": 100
+  },
+  {
+    "id": 16,
+    "title": "Phishing Indicator",
+    "prompt": "Submit the authentication result that failed: SPF, DKIM, or DMARC as shown in the evidence.\n\nLAB EVIDENCE:\nMail authentication results: spf=fail; dkim=pass; dmarc=fail.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{spf_fail}",
+    "category": "Social Engineering",
+    "points": 100
+  },
+  {
+    "id": 17,
+    "title": "Availability Incident",
+    "prompt": "A service is overwhelmed by a large volume of requests from many sources. Submit the common acronym for this distributed availability attack.\n\nLAB EVIDENCE:\nMonitoring note: a service is overwhelmed by traffic arriving from many distributed source systems.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{ddos}",
+    "category": "Denial of Service",
+    "points": 100
+  },
+  {
+    "id": 18,
+    "title": "Session Security",
+    "prompt": "A web app reuses the same session identifier after login. Submit the missing defensive action.\n\nLAB EVIDENCE:\nTest result: session cookie value before authentication equals the value after successful login.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{session_regeneration}",
+    "category": "Session Hijacking",
+    "points": 100
+  },
+  {
+    "id": 19,
+    "title": "Cookie Protection",
+    "prompt": "Submit the cookie attribute that prevents JavaScript access to a session cookie.\n\nLAB EVIDENCE:\nSet-Cookie excerpt: sessionid=abc123; Secure; SameSite=Lax. The JavaScript-access restriction is not present.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{httponly}",
+    "category": "Session Security",
+    "points": 100
+  },
+  {
+    "id": 20,
+    "title": "IDS Alert Review",
+    "prompt": "An IDS alert includes a source, destination, signature and timestamp. Submit the artifact an analyst should correlate next to confirm impact.\n\nLAB EVIDENCE:\nIDS alert: source 192.0.2.18, destination 192.0.2.40, signature WEB-900, timestamp 10:02:11. Determine impact by correlating server-side records.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{server_logs}",
+    "category": "IDS and Monitoring",
+    "points": 100
+  },
+  {
+    "id": 21,
+    "title": "Firewall Rule Review",
+    "prompt": "A rule allows inbound traffic to every port from any source. Submit the principle violated by this broad rule.\n\nLAB EVIDENCE:\nFirewall rule: ALLOW inbound from ANY source to ANY destination port. Security baseline requires restrictive rules and deny-by-default.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{default_deny}",
+    "category": "Firewall",
+    "points": 100
+  },
+  {
+    "id": 22,
+    "title": "Web Server Hardening",
+    "prompt": "Submit the response header that helps restrict browser resource loading to an approved policy.\n\nLAB EVIDENCE:\nHTTP response includes Content-Type and X-Content-Type-Options but no policy limiting allowed script, style, and image sources.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{content_security_policy}",
+    "category": "Web Servers",
+    "points": 100
+  },
+  {
+    "id": 23,
+    "title": "Directory Listing",
+    "prompt": "A server exposes a browsable directory containing backup files. Submit the misconfiguration name.\n\nLAB EVIDENCE:\nBrowser screenshot description: GET /backup/ returns an index of .zip and .bak files instead of a denial response.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{directory_listing}",
+    "category": "Web Servers",
+    "points": 100
+  },
+  {
+    "id": 24,
+    "title": "Input Validation",
+    "prompt": "A form accepts unexpected characters and causes an application error. Submit the defensive practice that should validate input against expected formats.\n\nLAB EVIDENCE:\nForm accepts arbitrary input; the business field is supposed to accept only a known set of department codes.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{allowlist_validation}",
+    "category": "Web Applications",
+    "points": 100
+  },
+  {
+    "id": 25,
+    "title": "SQL Injection Recognition",
+    "prompt": "User-controlled input changes the structure of a database query. Submit the vulnerability class.\n\nLAB EVIDENCE:\nApplication log: user-controlled text changes the SQL WHERE clause rather than being treated only as a data value.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{sql_injection}",
+    "category": "SQL Injection",
+    "points": 100
+  },
+  {
+    "id": 26,
+    "title": "Wireless Security",
+    "prompt": "A lab access point uses obsolete WEP encryption. Submit the modern Wi-Fi security standard recommended for new deployments .\n\nLAB EVIDENCE:\nAccess point configuration: security mode = WEP; the policy requires a current protected Wi-Fi standard.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{wpa3}",
+    "category": "Wireless",
+    "points": 100
+  },
+  {
+    "id": 27,
+    "title": "Mobile Platform",
+    "prompt": "An app stores an API token in a plaintext local preferences file. Submit the data protection failure.\n\nLAB EVIDENCE:\nMobile review: API token is stored in plaintext in an app preferences file readable from the app's local storage.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{insecure_local_storage}",
+    "category": "Mobile Security",
+    "points": 100
+  },
+  {
+    "id": 28,
+    "title": "IoT Security",
+    "prompt": "An IoT device ships with an unchanged universal admin password. Submit the primary weakness category.\n\nLAB EVIDENCE:\nDevice inventory: every deployed camera still uses the vendor's same default administrator password.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{default_credentials}",
+    "category": "IoT Security",
+    "points": 100
+  },
+  {
+    "id": 29,
+    "title": "Cloud Access Control",
+    "prompt": "A cloud storage bucket permits anonymous public reads despite containing internal files. Submit the misconfiguration category.\n\nLAB EVIDENCE:\nCloud storage policy: anonymous principal has read access to a bucket containing internal documents.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{public_bucket}",
+    "category": "Cloud Security",
+    "points": 100
+  },
+  {
+    "id": 30,
+    "title": "Cryptography",
+    "prompt": "A system uses encryption but stores the decryption key beside the encrypted database. Submit the key-management weakness.\n\nLAB EVIDENCE:\nArchitecture note: database is encrypted at rest, but its decryption key is stored in the same directory as the database.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{poor_key_management}",
+    "category": "Cryptography",
+    "points": 100
+  }
+]

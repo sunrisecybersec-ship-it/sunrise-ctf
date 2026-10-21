@@ -1,0 +1,242 @@
+[
+  {
+    "id": 1,
+    "title": "API Object Authorization",
+    "prompt": "In the isolated API lab, change the object identifier only within your assigned test account and compare authorization responses. Submit the vulnerability class if another test user's record is returned.\n\nLAB EVIDENCE:\nLab request: GET /api/users/204/profile with session for test user 103 returns user 204's private profile with HTTP 200.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{idor}",
+    "category": "API / Access Control",
+    "points": 100
+  },
+  {
+    "id": 2,
+    "title": "Clickjacking",
+    "prompt": "Inspect the lab response headers. Submit the header that can prevent the page from being embedded by untrusted origins when configured appropriately.\n\nLAB EVIDENCE:\nLab response headers contain no X-Frame-Options and no CSP frame-ancestors directive; the page can be embedded by another origin.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{x_frame_options}",
+    "category": "Clickjacking",
+    "points": 100
+  },
+  {
+    "id": 3,
+    "title": "PHP Input Handling",
+    "prompt": "In the provided PHP source review, identify the function used to encode HTML special characters before output. Submit its PHP function name.\n\nLAB EVIDENCE:\nCode excerpt: echo $_GET['name'];. The lab task is to identify the PHP output-encoding function suitable for HTML text context.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{htmlspecialchars}",
+    "category": "PHP Basics",
+    "points": 100
+  },
+  {
+    "id": 4,
+    "title": "Reflected XSS",
+    "prompt": "Use the designated XSS training page and a harmless proof string. Submit the vulnerability type when input is reflected and executed in the browser context.\n\nLAB EVIDENCE:\nLab result: a harmless marker supplied in a query parameter is reflected into HTML without encoding and executes in the response page.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{reflected_xss}",
+    "category": "XSS",
+    "points": 100
+  },
+  {
+    "id": 5,
+    "title": "Stored XSS",
+    "prompt": "In the lab guestbook, submit a harmless marker and inspect the page as a second test user. Submit the XSS type if the payload persists and executes.\n\nLAB EVIDENCE:\nLab result: a harmless marker saved in a guestbook is rendered and executes when a second test account opens the entry.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{stored_xss}",
+    "category": "XSS",
+    "points": 100
+  },
+  {
+    "id": 6,
+    "title": "DOM XSS",
+    "prompt": "It writes untrusted input to a dangerous HTML sink. Submit the sink name used in the lab.\n\nLAB EVIDENCE:\nSource excerpt: document.querySelector('#result').innerHTML = location.hash.slice(1);\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{innerHTML}",
+    "category": "XSS",
+    "points": 100
+  },
+  {
+    "id": 7,
+    "title": "SQLi Root Cause",
+    "prompt": "Submit the database API approach that separates query structure from user-supplied values.\n\nLAB EVIDENCE:\nCode excerpt: $sql = \"SELECT * FROM users WHERE email='\" . $email . \"'\"; The query mixes SQL structure and untrusted data.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{prepared_statements}",
+    "category": "Advanced SQL Injection",
+    "points": 100
+  },
+  {
+    "id": 8,
+    "title": "CSRF Defense",
+    "prompt": "In the local banking demo, identify the per-session unpredictable token used to prevent forged state-changing requests.\n\nLAB EVIDENCE:\nLab form submits a state-changing POST with a valid session cookie but no unpredictable anti-CSRF token.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{csrf_token}",
+    "category": "CSRF",
+    "points": 100
+  },
+  {
+    "id": 9,
+    "title": "Host Header Injection",
+    "prompt": "A password-reset email uses an attacker-controlled Host header to build its reset URL. Submit the vulnerable input source.\n\nLAB EVIDENCE:\nPassword reset link is built using the raw HTTP Host header; changing the header changes the generated reset URL in the lab.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{host_header}",
+    "category": "Host Header Injection",
+    "points": 100
+  },
+  {
+    "id": 10,
+    "title": "Linux Privilege Escalation",
+    "prompt": "A root-run script is writable by an unprivileged user. Submit the permission weakness to investigate.\n\nLAB EVIDENCE:\nAuthorized lab enumeration: /opt/maintenance.sh is owned by root, executed by a root cron job, and writable by the trainee account.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{writable_root_script}",
+    "category": "Privilege Escalation",
+    "points": 100
+  },
+  {
+    "id": 11,
+    "title": "Directory Traversal",
+    "prompt": "The lab file viewer accepts a path and reads a file outside its intended directory. Submit the vulnerability name.\n\nLAB EVIDENCE:\nLab file viewer accepts a path parameter and can read a file outside its intended directory after path normalization is bypassed.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{path_traversal}",
+    "category": "Directory Traversal",
+    "points": 100
+  },
+  {
+    "id": 12,
+    "title": "Insecure Deserialization",
+    "prompt": "The lab accepts serialized client-controlled objects without integrity checks. Submit the vulnerability class.\n\nLAB EVIDENCE:\nLab endpoint accepts a client-controlled serialized object and deserializes it without integrity validation or a safe schema.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{insecure_deserialization}",
+    "category": "Deserialization",
+    "points": 100
+  },
+  {
+    "id": 13,
+    "title": "RCE Validation",
+    "prompt": "In the isolated command-injection lab, the provided harmless marker appears in the server-side command output. Submit the impact category.\n\nLAB EVIDENCE:\nIsolated command-injection lab: a harmless fixed marker produced by the server-side command appears in the lab response.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{remote_code_execution}",
+    "category": "RCE",
+    "points": 100
+  },
+  {
+    "id": 14,
+    "title": "Metasploit Lab",
+    "prompt": "In the authorized Metasploitable lab, record the module's documented vulnerability identifier from the supplied lab brief. Submit the identifier exactly as shown in the brief.\n\nLAB EVIDENCE:\nAuthorized training target brief: the deliberately vulnerable SMB service is associated with CVE-2017-0144; use only the isolated target.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{CVE-2017-0144}",
+    "category": "Metasploit",
+    "points": 100
+  },
+  {
+    "id": 15,
+    "title": "Rate Limiting",
+    "prompt": "The login endpoint permits repeated failed attempts without delay or lockout. Submit the missing control.\n\nLAB EVIDENCE:\nLogin test: 50 consecutive failed attempts return the same response without delay, throttling, lockout, or monitoring.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{rate_limiting}",
+    "category": "Brute Force Protection",
+    "points": 100
+  },
+  {
+    "id": 16,
+    "title": "SSRF",
+    "prompt": "In the SSRF training lab, a URL-fetching feature can reach a mock internal-only service. Submit the vulnerability acronym.\n\nLAB EVIDENCE:\nLab URL-fetch feature can request a mock internal-only service at 10.10.10.10 and returns its synthetic response to the user.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{ssrf}",
+    "category": "SSRF",
+    "points": 100
+  },
+  {
+    "id": 17,
+    "title": "SSRF Mitigation",
+    "prompt": "Submit the allow-list control that limits destinations to approved hosts.\n\nLAB EVIDENCE:\nURL-fetcher design: only two fixed partner hostnames are approved; requests to all other hosts must be rejected after DNS resolution and redirect checks.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{destination_allowlist}",
+    "category": "SSRF",
+    "points": 100
+  },
+  {
+    "id": 18,
+    "title": "Subdomain Takeover",
+    "prompt": "A DNS record points to an unclaimed third-party hosting resource. Submit the vulnerability category.\n\nLAB EVIDENCE:\nDNS evidence: docs.example.test is a CNAME to an unclaimed third-party hosting resource that returns a provider's 'site not found' page.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{subdomain_takeover}",
+    "category": "Subdomain Takeover",
+    "points": 100
+  },
+  {
+    "id": 19,
+    "title": "Bug Bounty Scope",
+    "prompt": "A target is technically vulnerable but excluded by the program policy. Submit the correct action before testing further.\n\nLAB EVIDENCE:\nProgram policy: only staging.example.test is in scope; production.example.test is explicitly excluded.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{respect_scope}",
+    "category": "Reporting Bugs",
+    "points": 100
+  },
+  {
+    "id": 20,
+    "title": "Bug Report Evidence",
+    "prompt": "A report claims account takeover but includes no reproducible steps. Submit the missing report component.\n\nLAB EVIDENCE:\nDraft report says 'account takeover possible' but contains no exact steps, request/response, or reproducible proof.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{reproduction_steps}",
+    "category": "Reporting Bugs",
+    "points": 100
+  },
+  {
+    "id": 21,
+    "title": "Impact Assessment",
+    "prompt": "A finding exposes another user's non-sensitive profile details. Submit the report section that explains the realistic consequence to users or the business.\n\nLAB EVIDENCE:\nFinding: a low-privilege test user can view another user's private profile fields. The report must explain the concrete user/business consequence.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{impact}",
+    "category": "Reporting Bugs",
+    "points": 100
+  },
+  {
+    "id": 22,
+    "title": "API Mass Assignment",
+    "prompt": "A lab API accepts a user-supplied role field and updates a standard user to admin. Submit the vulnerability class.\n\nLAB EVIDENCE:\nLab request PATCH /api/profile includes {\"displayName\":\"A\",\"role\":\"admin\"}; server updates the role from user-controlled JSON.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{mass_assignment}",
+    "category": "API Security",
+    "points": 100
+  },
+  {
+    "id": 23,
+    "title": "Broken Authentication",
+    "prompt": "A password-reset token remains valid after it is used once. Submit the missing token lifecycle property.\n\nLAB EVIDENCE:\nPassword reset token can be submitted successfully twice after the first successful reset.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{single_use_token}",
+    "category": "Authentication",
+    "points": 100
+  },
+  {
+    "id": 24,
+    "title": "CORS Misconfiguration",
+    "prompt": "A lab API reflects arbitrary origins and allows credentials. Submit the browser security policy name involved.\n\nLAB EVIDENCE:\nLab response reflects Origin from arbitrary callers and sets Access-Control-Allow-Credentials: true.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{cors}",
+    "category": "API Security",
+    "points": 100
+  },
+  {
+    "id": 25,
+    "title": "JWT Validation",
+    "prompt": "The lab API accepts a token with an invalid signature. Submit the validation property that was skipped.\n\nLAB EVIDENCE:\nLab API accepts a JWT whose payload was modified without a valid signature.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{signature_validation}",
+    "category": "API Security",
+    "points": 100
+  },
+  {
+    "id": 26,
+    "title": "File Upload",
+    "prompt": "The lab accepts executable content as an avatar and stores it in a web-accessible executable directory. Submit the primary weakness.\n\nLAB EVIDENCE:\nAvatar upload accepts executable content and saves it under a web-accessible directory configured to execute uploaded scripts.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{unrestricted_file_upload}",
+    "category": "Web Application",
+    "points": 100
+  },
+  {
+    "id": 27,
+    "title": "Security Headers",
+    "prompt": "Submit the header that instructs browsers to upgrade eligible HTTP requests to HTTPS.\n\nLAB EVIDENCE:\nHTTP response redirects eligible HTTP requests to HTTPS only when the browser is instructed by the Strict-Transport-Security header.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{strict_transport_security}",
+    "category": "Web Application",
+    "points": 100
+  },
+  {
+    "id": 28,
+    "title": "Authentication Bypass",
+    "prompt": "The lab's admin endpoint trusts a client-controlled role parameter. Submit the access-control principle violated.\n\nLAB EVIDENCE:\nAdmin endpoint trusts a client-supplied role=admin field without checking the authenticated user's server-side privileges.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{server_side_authorization}",
+    "category": "Access Control",
+    "points": 100
+  },
+  {
+    "id": 29,
+    "title": "Evidence Integrity",
+    "prompt": "Before submitting a vulnerability report, submit the standard digest algorithm used in the lab instructions to verify an evidence file.\n\nLAB EVIDENCE:\nLab reporting instructions require a 64-character SHA-256 digest to verify evidence-file integrity.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{sha256}",
+    "category": "Reporting",
+    "points": 100
+  },
+  {
+    "id": 30,
+    "title": "Remediation",
+    "prompt": "The vulnerable application builds SQL by concatenating user input. Submit the primary code-level remediation.\n\nLAB EVIDENCE:\nCode review finds SQL built by concatenating untrusted input; the fix must separate query structure from values.\n\nSubmit the answer as a flag in this format: SUNRISE{answer}. Use lowercase unless the answer is a CVE identifier.",
+    "flag": "SUNRISE{parameterized_queries}",
+    "category": "Secure Coding",
+    "points": 100
+  }
+]

@@ -1,0 +1,60 @@
+services:
+  volume-init:
+    build: .
+    user: "0:0"
+    entrypoint: ["sh", "-c", "chown -R 10001:10001 /data"]
+    command: []
+    volumes:
+      - examdata:/data
+    restart: "no"
+
+  level1:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      LEVEL: level1
+      PORT: "8001"
+      DURATION_MINUTES: ${LEVEL1_DURATION_MINUTES:-60}
+      DB_PATH: /data/exam.db
+    ports:
+      - "127.0.0.1:8001:8001"
+    volumes:
+      - examdata:/data
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  level2:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      LEVEL: level2
+      PORT: "8002"
+      DURATION_MINUTES: ${LEVEL2_DURATION_MINUTES:-120}
+      DB_PATH: /data/exam.db
+    ports:
+      - "127.0.0.1:8002:8002"
+    volumes:
+      - examdata:/data
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+      level1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  examdata:
