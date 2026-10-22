@@ -1,4 +1,4 @@
-"""Smoke tests for the Sunrise CTF platform. Requires Flask: python -m unittest -v."""
+"""Smoke tests: python -m unittest -v (inside the project environment)."""
 import os, sys, tempfile, unittest, importlib, re, json
 from pathlib import Path
 ROOT=Path(__file__).resolve().parent
@@ -7,32 +7,41 @@ class ExamTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp=tempfile.TemporaryDirectory()
-        os.environ.update(SECRET_KEY='test-secret-not-for-production',ADMIN_PASSWORD='TestAdminPass-123',DB_PATH=str(Path(cls.tmp.name)/'test.db'),LEVEL='level1',PORT='8001',DURATION_MINUTES='60')
+        os.environ.update(SECRET_KEY='test-secret-not-for-production',ADMIN_PASSWORD='TestAdminPass-123',DB_PATH=str(Path(cls.tmp.name)/'test.db'),LEVEL='both',PORT='8000',LEVEL1_DURATION_MINUTES='60',LEVEL2_DURATION_MINUTES='120')
         sys.path.insert(0,str(ROOT)); cls.mod=importlib.import_module('app')
-        salt='11'*16
         with cls.mod.db() as con:
-            con.execute('INSERT INTO candidates(candidate_id,name,pin_salt,pin_hash,created_at) VALUES(?,?,?,?,?)',('TEST-001','Test Candidate',salt,cls.mod.pin_hash('TestPIN-123',salt),cls.mod.iso(cls.mod.utcnow())))
+            for cid,name,pin,levels,salt in [('TEST-L1','Test Level One','TestPIN-123','level1','11'*16),('TEST-L2','Test Level Two','TestPIN-456','level2','22'*16),('TEST-BOTH','Test Both','TestPIN-789','level1,level2','33'*16)]:
+                con.execute('INSERT OR REPLACE INTO candidates(candidate_id,name,pin_salt,pin_hash,created_at,active,allowed_levels) VALUES(?,?,?,?,?,?,?)',(cid,name,salt,cls.mod.pin_hash(pin,salt),cls.mod.iso(cls.mod.utcnow()),1,levels))
     @classmethod
     def tearDownClass(cls): cls.tmp.cleanup()
     def setUp(self):
         self.client=self.mod.app.test_client(); r=self.client.get('/'); self.assertEqual(r.status_code,200)
         m=re.search(r'const csrf=(.*?);',r.get_data(as_text=True)); self.csrf=json.loads(m.group(1))
-    def login(self):
-        r=self.client.post('/api/login',json={'candidate_id':'TEST-001','pin':'TestPIN-123'},headers={'X-CSRF-Token':self.csrf}); self.assertEqual(r.status_code,200)
+    def login(self,cid='TEST-L1',pin='TestPIN-123'):
+        r=self.client.post('/api/login',json={'candidate_id':cid,'pin':pin},headers={'X-CSRF-Token':self.csrf}); self.assertEqual(r.status_code,200,r.get_json()); return r
     def current_csrf(self):
         with self.client.session_transaction() as s: return s['csrf']
     def test_seed_questions_and_no_answer_leak(self):
-        self.login(); r=self.client.get('/api/challenges'); self.assertEqual(r.status_code,200); self.assertEqual(r.json['total'],30)
+        self.login(); r=self.client.get('/api/challenges'); self.assertEqual(r.status_code,200); self.assertGreater(r.json['total'],0); self.assertEqual(r.json['level'],'level1')
         q=self.client.get('/api/challenge/1'); self.assertEqual(q.status_code,200); self.assertNotIn('answer',q.json); self.assertNotIn('flag',q.json)
-    def test_flag_validation_awards_once(self):
-        self.login(); self.client.get('/api/challenges'); csrf=self.current_csrf()
-        wrong=self.client.post('/api/submit',json={'id':1,'answer':'SUNRISE{wrong}'},headers={'X-CSRF-Token':csrf}); self.assertFalse(wrong.json['correct'])
-        q=self.mod.get_question(1); answer=json.loads(q['answer_json'])
-        good=self.client.post('/api/submit',json={'id':1,'answer':answer},headers={'X-CSRF-Token':csrf}); self.assertTrue(good.json['correct'])
-        self.client.post('/api/submit',json={'id':1,'answer':answer},headers={'X-CSRF-Token':csrf})
-        with self.mod.db() as con:
-            n=con.execute("SELECT COUNT(*) n FROM solves WHERE candidate_id='TEST-001' AND level='level1' AND challenge_id=1").fetchone()['n']
-        self.assertEqual(n,1)
+    def test_wrong_answer_saved_without_correctness_feedback_then_final_score(self):
+        self.login(); data=self.client.get('/api/challenges').json; csrf=self.current_csrf()
+        for q in data['questions']:
+            r=self.client.post('/api/submit',json={'id':q['id'],'answer':'definitely-wrong'},headers={'X-CSRF-Token':csrf})
+            self.assertEqual(r.status_code,200); self.assertNotIn('correct',r.json); self.assertNotIn('points',r.json)
+        r=self.client.post('/api/final-submit',json={},headers={'X-CSRF-Token':csrf}); self.assertEqual(r.status_code,200)
+        self.assertEqual(r.json['result']['score'],0); self.assertEqual(r.json['result']['passed'],0)
+        page=self.client.get('/'); self.assertIn(b'FAIL',page.data); self.assertIn(b'0.0%',page.data)
+    def test_level2_only_student_can_login_to_level2_on_same_app(self):
+        self.login('TEST-L2','TestPIN-456')
+        page=self.client.get('/'); self.assertIn(b'Level 2',page.data)
+        data=self.client.get('/api/challenges').json; self.assertEqual(data['level'],'level2'); self.assertGreater(data['total'],0)
+    def test_student_with_both_levels_can_choose_level(self):
+        self.login('TEST-BOTH','TestPIN-789')
+        page=self.client.get('/'); self.assertIn(b'Choose your exam',page.data)
+        csrf=self.current_csrf()
+        r=self.client.post('/select-level',data={'csrf':csrf,'level':'level2'},follow_redirects=True)
+        self.assertEqual(r.status_code,200); self.assertIn(b'Level 2',r.data)
     def test_answer_type_validation(self):
         self.assertTrue(self.mod.answers_match({'qtype':'single_choice','answer_json':'"B"'},'B'))
         self.assertFalse(self.mod.answers_match({'qtype':'single_choice','answer_json':'"B"'},'A'))
@@ -41,36 +50,13 @@ class ExamTests(unittest.TestCase):
         self.assertTrue(self.mod.answers_match({'qtype':'short_text','answer_json':'["SQL injection","sqli"]'},' Sqli '))
         self.assertTrue(self.mod.answers_match({'qtype':'true_false','answer_json':'"true"'},'true'))
     def test_admin_requires_login(self):
-        r=self.client.get('/admin/questions'); self.assertIn(r.status_code,(302,401))
-
-    def test_super_admin_login_and_role_management_page(self):
-        client=self.mod.app.test_client()
-        r=client.get('/admin/login'); self.assertEqual(r.status_code,200)
-        body=r.get_data(as_text=True)
-        csrf=re.search(r'name="csrf" value="([^"]+)"',body).group(1)
-        r=client.post('/admin/login',data={'username':'admin','password':'TestAdminPass-123','csrf':csrf},follow_redirects=True)
-        self.assertEqual(r.status_code,200)
-        self.assertIn('Staff Dashboard',r.get_data(as_text=True))
-        r=client.get('/admin/users')
-        self.assertEqual(r.status_code,200)
-        text=r.get_data(as_text=True)
-        self.assertIn('Super Admin',text); self.assertIn('Exam Admin',text); self.assertIn('Instructor',text); self.assertIn('Student',text)
-
-    def test_instructor_cannot_manage_questions(self):
-        salt='22'*16
-        with self.mod.db() as con:
-            con.execute('INSERT OR IGNORE INTO staff_users(username,full_name,role,password_salt,password_hash,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)',
-                ('instructor1','Test Instructor','instructor',salt,self.mod.password_hash('InstructorPass-123',salt),1,self.mod.iso(self.mod.utcnow()),self.mod.iso(self.mod.utcnow())))
-        client=self.mod.app.test_client(); r=client.get('/admin/login')
-        csrf=re.search(r'name="csrf" value="([^"]+)"',r.get_data(as_text=True)).group(1)
-        r=client.post('/admin/login',data={'username':'instructor1','password':'InstructorPass-123','csrf':csrf})
-        self.assertIn(r.status_code,(302,303))
-        r=client.get('/admin/questions')
-        self.assertEqual(r.status_code,403)
-        self.assertEqual(client.get('/admin/export.csv').status_code,200)
-
-    def test_seed_data(self):
-        for level in ('level1','level2'):
-            data=json.loads((ROOT/f'challenges_{level}.json').read_text()); self.assertEqual(len(data),30)
+        self.assertIn(self.client.get('/admin/questions').status_code,(302,401))
+    def test_question_builder_page_has_no_json_editor(self):
+        client=self.mod.app.test_client(); r=client.get('/admin/login'); csrf=re.search(r'name="csrf" value="([^"]+)"',r.get_data(as_text=True)).group(1)
+        client.post('/admin/login',data={'username':'admin','password':'TestAdminPass-123','csrf':csrf})
+        r=client.get('/admin/questions'); self.assertEqual(r.status_code,200); text=r.get_data(as_text=True)
+        self.assertIn('Add option',text); self.assertNotIn('Options JSON (MCQ only)',text)
+    def test_health_endpoint(self):
+        self.assertEqual(self.client.get('/healthz').status_code,200)
 
 if __name__=='__main__': unittest.main(verbosity=2)

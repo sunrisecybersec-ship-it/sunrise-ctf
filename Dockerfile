@@ -6,5 +6,5 @@ RUN pip install --no-cache-dir -r requirements.txt && useradd --system --uid 100
 COPY app.py challenges_level1.json challenges_level2.json setup.py roles.html ./
 RUN mkdir -p /data && chown -R appuser:appuser /app /data
 USER appuser
-EXPOSE 8001 8002
-CMD ["python", "app.py"]
+EXPOSE 8000 8001 8002
+CMD ["sh", "-c", "exec gunicorn --bind 0.0.0.0:${PORT:-8000} --workers 1 --threads 4 --timeout 120 app:app"]

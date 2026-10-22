@@ -6,14 +6,16 @@ from functools import wraps
 from pathlib import Path
 from flask import Flask, request, jsonify, session, render_template_string, redirect, make_response, url_for
 
-LEVEL = os.environ.get("LEVEL", "level1").lower()
-if LEVEL not in ("level1", "level2"):
-    raise RuntimeError("LEVEL must be level1 or level2")
-PORT = int(os.environ.get("PORT", "8001" if LEVEL == "level1" else "8002"))
+# Set LEVEL=both in Render to serve both exams from one website and admin panel.
+LEVEL = os.environ.get("LEVEL", "both").lower()
+if LEVEL not in ("level1", "level2", "both"):
+    raise RuntimeError("LEVEL must be level1, level2, or both")
+PORT = int(os.environ.get("PORT", "8000"))
 DB_PATH = os.environ.get("DB_PATH", "/data/exam.db")
 SECRET_KEY = os.environ.get("SECRET_KEY")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD")
-DURATION_MINUTES = int(os.environ.get("DURATION_MINUTES", "60" if LEVEL == "level1" else "120"))
+DURATION_MINUTES = int(os.environ.get("DURATION_MINUTES", "60"))
+LEVEL_DURATIONS = {"level1": int(os.environ.get("LEVEL1_DURATION_MINUTES", "60")), "level2": int(os.environ.get("LEVEL2_DURATION_MINUTES", "120"))}
 if not SECRET_KEY or not ADMIN_PASSWORD:
     raise RuntimeError("SECRET_KEY and ADMIN_PASSWORD are required. Run python setup.py first.")
 os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
@@ -69,6 +71,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS solves(candidate_id TEXT NOT NULL,level TEXT NOT NULL,challenge_id INTEGER NOT NULL,points INTEGER NOT NULL,solved_at TEXT NOT NULL,PRIMARY KEY(candidate_id,level,challenge_id),FOREIGN KEY(candidate_id) REFERENCES candidates(candidate_id));
         CREATE TABLE IF NOT EXISTS submissions(id INTEGER PRIMARY KEY AUTOINCREMENT,candidate_id TEXT NOT NULL,level TEXT NOT NULL,challenge_id INTEGER NOT NULL,correct INTEGER NOT NULL,submitted_at TEXT NOT NULL,FOREIGN KEY(candidate_id) REFERENCES candidates(candidate_id));
         CREATE INDEX IF NOT EXISTS idx_submissions_rate ON submissions(candidate_id,level,submitted_at);
+        CREATE TABLE IF NOT EXISTS exam_answers(candidate_id TEXT NOT NULL, level TEXT NOT NULL, question_id INTEGER NOT NULL, answer_json TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(candidate_id,level,question_id), FOREIGN KEY(candidate_id) REFERENCES candidates(candidate_id));
+        CREATE TABLE IF NOT EXISTS exam_results(candidate_id TEXT NOT NULL, level TEXT NOT NULL, score INTEGER NOT NULL, max_score INTEGER NOT NULL, percentage REAL NOT NULL, passed INTEGER NOT NULL, submitted_at TEXT NOT NULL, PRIMARY KEY(candidate_id,level), FOREIGN KEY(candidate_id) REFERENCES candidates(candidate_id));
         ''')
         # Migrate databases created by earlier versions.
         cols={r["name"] for r in con.execute("PRAGMA table_info(candidates)").fetchall()}
@@ -93,6 +97,17 @@ def init_db():
                         (int(item["id"]) if level=="level1" else int(item["id"])+1000,level,item["title"],item["prompt"],item.get("category","General"),"flag","[]",json.dumps(item["flag"]),int(item.get("points",100)),1,now,now))
 init_db()
 
+def active_level():
+    selected = session.get("exam_level")
+    if selected in ("level1", "level2") and (LEVEL == "both" or selected == LEVEL):
+        return selected
+    return LEVEL if LEVEL in ("level1", "level2") else None
+
+def allowed_levels_for(candidate_id):
+    with db() as con:
+        row = con.execute("SELECT allowed_levels FROM candidates WHERE candidate_id=?", (candidate_id,)).fetchone()
+    return [x for x in (row["allowed_levels"] or "").split(",") if x in ("level1", "level2")] if row else []
+
 def csrf_token():
     if "csrf" not in session: session["csrf"]=secrets.token_urlsafe(24)
     return session["csrf"]
@@ -107,8 +122,14 @@ def student_required(fn):
         with db() as con: active=con.execute("SELECT active,allowed_levels FROM candidates WHERE candidate_id=?",(cid,)).fetchone()
         if not active or not active["active"]:
             session.clear(); return jsonify({"error":"This student account is disabled. Contact the exam administrator."}),401
-        if LEVEL not in (active["allowed_levels"] or "").split(","):
-            session.clear(); return jsonify({"error":"Your account is not assigned to this exam level. Contact the exam administrator."}),403
+        lev = active_level()
+        if not lev:
+            return jsonify({"error":"Choose an exam level first."}), 409
+        if lev not in (active["allowed_levels"] or "").split(","):
+            return jsonify({"error":"Your account is not assigned to this exam level. Contact the exam administrator."}),403
+        with db() as con:
+            final = con.execute("SELECT 1 FROM exam_results WHERE candidate_id=? AND level=?", (cid, lev)).fetchone()
+        request.exam_finalized = bool(final)
         return fn(*a,**kw)
     return wrapped
 def permission_required(permission=None):
@@ -150,7 +171,8 @@ def get_questions(level, active_only=True):
         q="SELECT * FROM questions WHERE level=?"+(" AND active=1" if active_only else "")+" ORDER BY id"
         rows=con.execute(q,(level,)).fetchall()
         return [dict(r) for r in rows]
-def get_question(qid, level=LEVEL, active_only=True):
+def get_question(qid, level=None, active_only=True):
+    level = level or active_level()
     with db() as con:
         q="SELECT * FROM questions WHERE id=? AND level=?"+(" AND active=1" if active_only else "")
         r=con.execute(q,(qid,level)).fetchone()
@@ -158,18 +180,22 @@ def get_question(qid, level=LEVEL, active_only=True):
 def public_question(q, solved=False):
     return {"id":q["id"],"title":q["title"],"prompt":q["prompt"],"category":q["category"],"qtype":q["qtype"],
             "options":json.loads(q["options_json"] or "[]"),"points":q["points"],"solved":solved}
-def exam_status(cid,start=False):
-    now=utcnow()
+def exam_status(cid, start=False, level=None):
+    level = level or active_level()
+    if level not in ("level1", "level2"):
+        return {"started": False, "expired": False, "remaining_seconds": 0, "deadline_at": None}
+    now = utcnow()
     with db() as con:
-        row=con.execute("SELECT started_at,deadline_at FROM exam_sessions WHERE candidate_id=? AND level=?",(cid,LEVEL)).fetchone()
+        row = con.execute("SELECT started_at,deadline_at FROM exam_sessions WHERE candidate_id=? AND level=?", (cid, level)).fetchone()
         if row is None and start:
-            deadline=now+timedelta(minutes=DURATION_MINUTES)
-            con.execute("INSERT OR IGNORE INTO exam_sessions(candidate_id,level,started_at,deadline_at) VALUES(?,?,?,?)",(cid,LEVEL,iso(now),iso(deadline)))
-            row=con.execute("SELECT started_at,deadline_at FROM exam_sessions WHERE candidate_id=? AND level=?",(cid,LEVEL)).fetchone()
-    if row is None: return {"started":False,"expired":False,"remaining_seconds":DURATION_MINUTES*60,"deadline_at":None}
-    deadline=datetime.fromisoformat(row["deadline_at"])
-    remaining=max(0,int((deadline-now).total_seconds()))
-    return {"started":True,"expired":remaining<=0,"remaining_seconds":remaining,"deadline_at":row["deadline_at"]}
+            deadline = now + timedelta(minutes=LEVEL_DURATIONS[level])
+            con.execute("INSERT OR IGNORE INTO exam_sessions(candidate_id,level,started_at,deadline_at) VALUES(?,?,?,?)", (cid, level, iso(now), iso(deadline)))
+            row = con.execute("SELECT started_at,deadline_at FROM exam_sessions WHERE candidate_id=? AND level=?", (cid, level)).fetchone()
+    if row is None:
+        return {"started": False, "expired": False, "remaining_seconds": LEVEL_DURATIONS[level]*60, "deadline_at": None}
+    deadline = datetime.fromisoformat(row["deadline_at"])
+    remaining = max(0, int((deadline-now).total_seconds()))
+    return {"started": True, "expired": remaining <= 0, "remaining_seconds": remaining, "deadline_at": row["deadline_at"]}
 
 def validate_question_form(data, existing=None):
     level=(existing["level"] if existing else str(data.get("level","level1")))
@@ -188,7 +214,7 @@ def validate_question_form(data, existing=None):
     try: options=json.loads(raw_options)
     except json.JSONDecodeError: raise ValueError("Options must be valid JSON.")
     if qtype in ("single_choice","multiple_choice"):
-        if not isinstance(options,list) or len(options)<2 or len(options)>12: raise ValueError("MCQ options must be a JSON list with 2–12 options.")
+        if not isinstance(options,list) or len(options)<2 or len(options)>50: raise ValueError("MCQ options must be a list with 2–50 options.")
         vals=[]; normalized=[]
         for opt in options:
             if not isinstance(opt,dict) or not str(opt.get("value","")).strip() or not str(opt.get("label","")).strip(): raise ValueError('Each option needs non-empty "value" and "label" fields.')
@@ -247,21 +273,24 @@ def security_headers(resp):
 
 LOGIN_HTML=r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sunrise CTF Sign in</title><style>body{margin:0;background:#0b1220;color:#e8eef8;font:16px system-ui;min-height:100vh;display:grid;place-items:center;padding:20px}.card{width:min(100%,460px);background:#111c30;border:1px solid #263750;border-radius:16px;padding:26px}input{width:100%;box-sizing:border-box;padding:12px;margin:8px 0;background:#09111f;color:#fff;border:1px solid #354965;border-radius:9px}button{width:100%;padding:12px;margin-top:12px;background:#58d5b3;border:0;border-radius:9px;font-weight:bold}.muted{color:#9aaec8;font-size:14px}.error{color:#fecdd3}</style></head><body><section class="card"><h1>Sunrise Cybersecurity CTF</h1><p class="muted">{{level_title}} · Candidate sign in</p><form id="login"><label>Candidate ID</label><input id="cid" autocomplete="username" required maxlength="80"><label>PIN</label><input id="pin" type="password" autocomplete="current-password" required maxlength="80"><button>Sign in</button></form><p id="msg" class="error"></p><p class="muted"><a href="/admin/login">Instructor sign in</a></p></section><script>const csrf={{csrf|tojson}};document.getElementById('login').onsubmit=async e=>{e.preventDefault();const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({candidate_id:document.getElementById('cid').value.trim(),pin:document.getElementById('pin').value})});const d=await r.json();if(r.ok)location.href='/';else document.getElementById('msg').textContent=d.error||'Sign in failed.';};</script></body></html>'''
 
-EXAM_HTML=r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sunrise CTF</title><style>
-:root{--bg:#0b1220;--panel:#111c30;--line:#263750;--text:#e8eef8;--muted:#9aaec8;--accent:#58d5b3}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,Arial}header{padding:20px max(18px,calc((100vw - 1180px)/2));border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}h1{margin:0;font-size:clamp(20px,3vw,29px)}header p,.muted{color:var(--muted);font-size:14px}.actions{display:flex;gap:8px;flex-wrap:wrap}button{cursor:pointer}.pill{border:1px solid var(--line);border-radius:99px;padding:7px 11px;font-size:13px}main{max-width:1180px;margin:22px auto;padding:0 16px;display:grid;grid-template-columns:290px 1fr;gap:16px}.panel,.challenge{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;min-width:0}.stat{font-size:25px;font-weight:750}.progress{height:8px;background:#24334b;border-radius:20px;overflow:hidden;margin:8px 0 16px}.bar{height:100%;background:var(--accent);width:0}nav{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-top:14px}nav button{padding:9px;border:1px solid var(--line);background:#17253b;color:var(--text);border-radius:8px}nav button.done{background:#145b42;border-color:#22a879}nav button.active{outline:2px solid var(--accent)}.tag{display:inline-block;background:#203657;color:#b8d5ff;padding:4px 9px;border-radius:20px;font-size:12px}.prompt{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.65;margin:18px 0}.answer-option{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--line);border-radius:9px;padding:12px;margin:8px 0}.answer-option input{margin-top:5px}.answer-text{width:100%;padding:12px;border:1px solid #354965;border-radius:9px;background:#09111f;color:#fff;font:inherit}.action{padding:10px 14px;border:0;border-radius:9px;background:var(--accent);color:#08231c;font-weight:750}.secondary{background:#243650;color:var(--text)}.feedback{display:none;margin-top:12px;padding:11px;border-radius:9px}.feedback.good{display:block;background:#123f31;color:#a7f3d0;border:1px solid #18865e}.feedback.bad{display:block;background:#4a1d2a;color:#fecdd3;border:1px solid #a33b55}.notice{padding:10px;border:1px solid #725b28;background:#3d321a;color:#f9e7a5;border-radius:9px;font-size:13px;margin-top:14px}footer{max-width:1180px;margin:auto;padding:0 16px 24px;color:var(--muted);font-size:12px}@media(max-width:800px){main{grid-template-columns:1fr}nav{grid-template-columns:repeat(6,1fr)}}
-</style></head><body><header><div><h1>Sunrise Cybersecurity CTF</h1><p>{{level_title}}</p></div><div class="actions"><span class="pill">{{candidate_name}} · {{candidate_id}}</span><span class="pill">Time left: <b id="timer">Loading…</b></span><button class="action secondary" id="logout">Sign out</button></div></header><main><aside class="panel"><div class="muted">CHALLENGES SOLVED</div><div class="stat"><span id="solved">0</span> / <span id="total">0</span></div><div class="progress"><div class="bar" id="bar"></div></div><div class="muted">Score</div><div class="stat"><span id="points">0</span> / <span id="maxpoints">0</span></div><p class="muted">Submit an answer to receive immediate green/red validation. Points are awarded once per challenge.</p><nav id="nav"></nav><div class="notice">Only use assigned training targets and evidence. Do not test unauthorized systems.</div></aside><section class="challenge"><div class="tag" id="category">Loading</div><h2 id="title">Loading challenge…</h2><div class="muted" id="meta"></div><div class="prompt" id="prompt"></div><form id="answerForm"><div id="answerArea"></div><div class="actions" style="margin-top:14px"><button class="action" id="submitBtn" type="submit">Submit answer</button><button class="action secondary" type="button" id="clear">Clear</button><button class="action secondary" type="button" id="next">Next challenge →</button></div></form><div id="feedback" class="feedback" role="status" aria-live="polite"></div><div id="expired" class="notice" style="display:none">Time is up. Answers are saved.</div></section></main><footer>Progress is stored on the exam server. Contact your instructor if you encounter a lab or access issue.</footer>
+EXAM_HTML=r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sunrise CTF Exam</title><style>
+:root{--bg:#0b1220;--panel:#111c30;--line:#263750;--text:#e8eef8;--muted:#9aaec8;--accent:#58d5b3}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,Arial}header{padding:20px max(18px,calc((100vw - 1180px)/2));border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}h1{margin:0;font-size:clamp(20px,3vw,29px)}header p,.muted{color:var(--muted);font-size:14px}.actions{display:flex;gap:8px;flex-wrap:wrap}button{cursor:pointer}.pill{border:1px solid var(--line);border-radius:99px;padding:7px 11px;font-size:13px}main{max-width:1180px;margin:22px auto;padding:0 16px;display:grid;grid-template-columns:290px 1fr;gap:16px}.panel,.challenge{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;min-width:0}.stat{font-size:25px;font-weight:750}.progress{height:8px;background:#24334b;border-radius:20px;overflow:hidden;margin:8px 0 16px}.bar{height:100%;background:var(--accent);width:0}nav{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-top:14px}nav button{padding:9px;border:1px solid var(--line);background:#17253b;color:var(--text);border-radius:8px}nav button.done{background:#145b42;border-color:#22a879}nav button.active{outline:2px solid var(--accent)}.tag{display:inline-block;background:#203657;color:#b8d5ff;padding:4px 9px;border-radius:20px;font-size:12px}.prompt{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.65;margin:18px 0}.answer-option{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--line);border-radius:9px;padding:12px;margin:8px 0}.answer-option input{margin-top:5px}.answer-text{width:100%;padding:12px;border:1px solid #354965;border-radius:9px;background:#09111f;color:#fff;font:inherit}.action{padding:10px 14px;border:0;border-radius:9px;background:var(--accent);color:#08231c;font-weight:750}.secondary{background:#243650;color:var(--text)}.feedback{margin-top:12px;padding:11px;border-radius:9px;background:#17253b;color:#c8d5e8}.notice{padding:10px;border:1px solid #725b28;background:#3d321a;color:#f9e7a5;border-radius:9px;font-size:13px;margin-top:14px}footer{max-width:1180px;margin:auto;padding:0 16px 24px;color:var(--muted);font-size:12px}.final{width:min(100%,520px);margin:24px auto;padding:26px;background:var(--panel);border:1px solid var(--line);border-radius:16px;text-align:center}.hidden{display:none!important}@media(max-width:800px){main{grid-template-columns:1fr}nav{grid-template-columns:repeat(6,1fr)}}
+</style></head><body><header><div><h1>Sunrise Cybersecurity CTF</h1><p>{{level_title}}</p></div><div class="actions"><span class="pill">{{candidate_name}} · {{candidate_id}}</span><span class="pill">Time left: <b id="timer">Loading…</b></span><button class="action secondary" id="logout">Sign out</button></div></header><main id="examMain"><aside class="panel"><div class="muted">QUESTIONS ANSWERED</div><div class="stat"><span id="answered">0</span> / <span id="total">0</span></div><div class="progress"><div class="bar" id="bar"></div></div><p class="muted">Save each answer as you go. No answer feedback is shown during the exam. Your score and pass/fail result appear only after final submission.</p><nav id="nav"></nav><div class="notice">Passing score: 70%. Review your answers before final submission.</div><button class="action" id="finish" type="button" style="width:100%;margin-top:14px">Submit completed exam</button></aside><section class="challenge"><div class="tag" id="category">Question</div><h2 id="title">Loading question…</h2><div class="muted" id="meta"></div><div class="prompt" id="prompt"></div><form id="answerForm"><div id="answerArea"></div><div class="actions" style="margin-top:14px"><button class="action" id="saveBtn" type="submit">Save answer</button><button class="action secondary" id="clear" type="button">Clear answer</button><button class="action secondary" id="next" type="button">Next question →</button></div></form><div id="feedback" class="feedback" role="status" aria-live="polite">Your answer has not been saved yet.</div><div id="expired" class="notice hidden">Time is up. Submit the exam to receive your result.</div></section></main><section id="result" class="final hidden"></section><footer>Answers are recorded privately. The final score and pass/fail result are shown after the exam is submitted.</footer>
 <script>
-const csrf={{csrf|tojson}};let questions=[],current=null,solvedSet=new Set(),deadline=null,timerHandle=null,expired=false;
+const csrf={{csrf|tojson}};let questions=[],current=null,answeredSet=new Set(),deadline=null,timerHandle=null,expired=false,finalized=false;
 const nav=document.getElementById('nav');async function api(url,opts={}){opts.headers=Object.assign({'X-CSRF-Token':csrf},opts.headers||{});return fetch(url,opts)}
-function feedback(kind,msg){const f=document.getElementById('feedback');f.className='feedback '+kind;f.textContent=msg}
-function stats(points,max){document.getElementById('solved').textContent=solvedSet.size;document.getElementById('points').textContent=points;document.getElementById('bar').style.width=(max?points/max*100:0)+'%';document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('done',solvedSet.has(Number(b.dataset.id))))}
-function renderTimer(){if(!deadline)return;let n=Math.max(0,Math.floor((deadline-Date.now())/1000));document.getElementById('timer').textContent=[Math.floor(n/3600),Math.floor(n%3600/60),n%60].map(x=>String(x).padStart(2,'0')).join(':');if(n<=0){expired=true;document.getElementById('expired').style.display='block';document.querySelectorAll('#answerArea input,#submitBtn,#clear,#next').forEach(x=>x.disabled=true);clearInterval(timerHandle)}}
-function renderAnswer(q){const area=document.getElementById('answerArea');area.replaceChildren();if(q.qtype==='single_choice'||q.qtype==='true_false'){(q.options||[]).forEach((o,i)=>{const label=document.createElement('label');label.className='answer-option';const input=document.createElement('input');input.type='radio';input.name='answer';input.value=o.value;input.required=true;const span=document.createElement('span');span.textContent=o.label;label.append(input,span);area.append(label)})}else if(q.qtype==='multiple_choice'){(q.options||[]).forEach(o=>{const label=document.createElement('label');label.className='answer-option';const input=document.createElement('input');input.type='checkbox';input.name='answer';input.value=o.value;const span=document.createElement('span');span.textContent=o.label;label.append(input,span);area.append(label)})}else{const label=document.createElement('label');label.textContent=q.qtype==='flag'?'Flag answer':'Text answer';label.htmlFor='answerText';const input=document.createElement('input');input.className='answer-text';input.id='answerText';input.name='answer';input.autocomplete='off';input.spellcheck=false;input.maxLength=500;input.required=true;input.placeholder=q.qtype==='flag'?'SUNRISE{your_answer}':'Enter your answer';area.append(label,input)}}
-async function load(id){if(expired)return;current=questions.find(q=>q.id===id);if(!current)return;const r=await api('/api/challenge/'+id);if(r.status===401){location.reload();return}const q=await r.json();if(!r.ok){feedback('bad',q.error||'Could not load challenge.');return}document.getElementById('title').textContent=q.title;document.getElementById('category').textContent=q.category;document.getElementById('meta').textContent='Challenge '+(questions.findIndex(x=>x.id===id)+1)+' of '+questions.length+' · '+q.points+' points'+(q.solved?' · SOLVED':'');document.getElementById('prompt').textContent=q.prompt;renderAnswer(q);document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',Number(b.dataset.id)===id));if(q.solved)feedback('good','✓ Already solved. Your points are saved.');else{const f=document.getElementById('feedback');f.className='feedback';f.textContent=''}}
-async function init(){const r=await api('/api/challenges');if(!r.ok){location.reload();return}const d=await r.json();questions=d.questions;solvedSet=new Set(d.solved);deadline=Date.parse(d.deadline_at);expired=d.expired;document.getElementById('total').textContent=questions.length;document.getElementById('maxpoints').textContent=d.max_points;nav.replaceChildren();questions.forEach((q,i)=>{const b=document.createElement('button');b.type='button';b.textContent=i+1;b.dataset.id=q.id;b.setAttribute('aria-label','Challenge '+(i+1));b.onclick=()=>load(q.id);nav.append(b)});stats(d.points,d.max_points);renderTimer();timerHandle=setInterval(renderTimer,1000);if(expired)document.getElementById('expired').style.display='block';if(questions.length)load(questions[0].id);else document.getElementById('title').textContent='No active challenges. Contact your instructor.'}
-document.getElementById('answerForm').onsubmit=async e=>{e.preventDefault();if(expired||!current)return;const q=current;let answer;if(q.qtype==='multiple_choice')answer=[...document.querySelectorAll('input[name="answer"]:checked')].map(x=>x.value);else if(q.qtype==='single_choice'||q.qtype==='true_false')answer=document.querySelector('input[name="answer"]:checked')?.value||'';else answer=document.getElementById('answerText').value;const btn=document.getElementById('submitBtn');btn.disabled=true;try{const r=await api('/api/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:q.id,answer})});const d=await r.json();if(r.status===401){location.reload();return}if(r.status===429){feedback('bad',d.error||'Too many attempts.');return}if(d.expired){expired=true;renderTimer();return}if(d.correct){solvedSet.add(q.id);feedback('good','✓ Correct! Your score has been saved.');document.getElementById('meta').textContent='Solved · '+q.points+' points'}else feedback('bad','✕ Incorrect answer. Review the challenge evidence and try again.');stats(d.points,d.max_points)}catch(e){feedback('bad','Network error. Check your connection and retry.')}finally{btn.disabled=expired}};
-document.getElementById('clear').onclick=()=>{if(expired)return;document.querySelectorAll('#answerArea input').forEach(x=>{if(x.type==='checkbox'||x.type==='radio')x.checked=false;else x.value=''});const f=document.getElementById('feedback');f.className='feedback';f.textContent=''};document.getElementById('next').onclick=()=>{if(!questions.length)return;const i=questions.findIndex(q=>q.id===current.id);load(questions[(i+1)%questions.length].id)};document.getElementById('logout').onclick=async()=>{await api('/api/logout',{method:'POST'});location.href='/'};init();
-</script></body></html>'''
+function message(msg){document.getElementById('feedback').textContent=msg}
+function stats(){document.getElementById('answered').textContent=answeredSet.size;document.getElementById('bar').style.width=(questions.length?answeredSet.size/questions.length*100:0)+'%';document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('done',answeredSet.has(Number(b.dataset.id))))}
+function renderTimer(){if(!deadline||finalized)return;let n=Math.max(0,Math.floor((deadline-Date.now())/1000));document.getElementById('timer').textContent=[Math.floor(n/3600),Math.floor(n%3600/60),n%60].map(x=>String(x).padStart(2,'0')).join(':');if(n<=0){expired=true;document.getElementById('expired').classList.remove('hidden');document.querySelectorAll('#answerArea input,#saveBtn,#clear,#next').forEach(x=>x.disabled=true);clearInterval(timerHandle)}}
+function renderAnswer(q){const area=document.getElementById('answerArea');area.replaceChildren();const saved=q.saved_answer;if(q.qtype==='single_choice'||q.qtype==='true_false'){(q.options||[]).forEach(o=>{const label=document.createElement('label');label.className='answer-option';const input=document.createElement('input');input.type='radio';input.name='answer';input.value=o.value;input.required=true;input.checked=saved===o.value;const span=document.createElement('span');span.textContent=o.label;label.append(input,span);area.append(label)})}else if(q.qtype==='multiple_choice'){(q.options||[]).forEach(o=>{const label=document.createElement('label');label.className='answer-option';const input=document.createElement('input');input.type='checkbox';input.name='answer';input.value=o.value;input.checked=Array.isArray(saved)&&saved.includes(o.value);const span=document.createElement('span');span.textContent=o.label;label.append(input,span);area.append(label)})}else{const label=document.createElement('label');label.textContent=q.qtype==='flag'?'Flag answer':'Text answer';label.htmlFor='answerText';const input=document.createElement('input');input.className='answer-text';input.id='answerText';input.name='answer';input.autocomplete='off';input.spellcheck=false;input.maxLength=500;input.required=true;input.value=typeof saved==='string'?saved:'';input.placeholder=q.qtype==='flag'?'Enter your flag':'Enter your answer';area.append(label,input)}if(finalized||expired)area.querySelectorAll('input').forEach(x=>x.disabled=true)}
+async function load(id){if(finalized)return;current=questions.find(q=>q.id===id);if(!current)return;const r=await api('/api/challenge/'+id);if(r.status===401){location.reload();return}const q=await r.json();if(!r.ok){message(q.error||'Could not load question.');return}document.getElementById('title').textContent=q.title;document.getElementById('category').textContent=q.category;document.getElementById('meta').textContent='Question '+(questions.findIndex(x=>x.id===id)+1)+' of '+questions.length+' · '+q.points+' points';document.getElementById('prompt').textContent=q.prompt;renderAnswer(q);document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',Number(b.dataset.id)===id));message(answeredSet.has(id)?'Saved. You may change this answer before final submission.':'Select or enter an answer, then click Save answer.')}
+async function init(){const r=await api('/api/challenges');if(!r.ok){location.reload();return}const d=await r.json();questions=d.questions;answeredSet=new Set(d.answered||[]);deadline=d.deadline_at?Date.parse(d.deadline_at):null;expired=d.expired;finalized=d.finalized;document.getElementById('total').textContent=questions.length;nav.replaceChildren();questions.forEach((q,i)=>{const b=document.createElement('button');b.type='button';b.textContent=i+1;b.dataset.id=q.id;b.setAttribute('aria-label','Question '+(i+1));b.onclick=()=>load(q.id);nav.append(b)});stats();if(finalized){showResult();return}renderTimer();timerHandle=setInterval(renderTimer,1000);if(expired)document.getElementById('expired').classList.remove('hidden');if(questions.length)load(questions[0].id);else document.getElementById('title').textContent='No active questions. Contact your instructor.'}
+document.getElementById('answerForm').onsubmit=async e=>{e.preventDefault();if(expired||finalized||!current)return;const q=current;let answer;if(q.qtype==='multiple_choice')answer=[...document.querySelectorAll('input[name="answer"]:checked')].map(x=>x.value);else if(q.qtype==='single_choice'||q.qtype==='true_false')answer=document.querySelector('input[name="answer"]:checked')?.value||'';else answer=document.getElementById('answerText').value;const btn=document.getElementById('saveBtn');btn.disabled=true;try{const r=await api('/api/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:q.id,answer})});const d=await r.json();if(r.status===401){location.reload();return}if(!r.ok){message(d.error||'Could not save answer.');return}answeredSet.add(q.id);stats();message('Answer saved. No correctness feedback is provided. You can change it before final submission.')}catch(e){message('Network error. Check your connection and retry.')}finally{btn.disabled=expired||finalized}};
+document.getElementById('clear').onclick=()=>{if(expired||finalized)return;document.querySelectorAll('#answerArea input').forEach(x=>{if(x.type==='checkbox'||x.type==='radio')x.checked=false;else x.value=''});message('Answer cleared in this view. Save a new answer to update your response.')};document.getElementById('next').onclick=()=>{if(!questions.length)return;const i=questions.findIndex(q=>q.id===current.id);load(questions[(i+1)%questions.length].id)};
+async function showResult(){const r=await api('/api/result');if(!r.ok){location.reload();return}const d=await r.json();if(!d.result){message('Submit the exam when you are ready to see your final result.');return}finalized=true;clearInterval(timerHandle);document.getElementById('examMain').classList.add('hidden');const el=document.getElementById('result');el.classList.remove('hidden');const x=d.result;el.innerHTML=`<h1>Exam submitted</h1><p class="muted">Your final result</p><div style="font-size:48px;font-weight:800">${Number(x.percentage).toFixed(1)}%</div><h2 style="color:${x.passed?'#58d5b3':'#fecdd3'}">${x.passed?'PASS':'FAIL'}</h2><p>Score: <b>${x.score} / ${x.max_score}</b></p><p>Passing score: 70%</p><p class="muted">Your answers have been submitted and the result recorded.</p><a href="/choose-level">Return to level selection</a> · <a href="/logout">Sign out</a>`}
+document.getElementById('finish').onclick=async()=>{if(finalized)return;const missing=questions.length-answeredSet.size;if(!expired&&missing>0){message(`Please answer all questions before final submission. ${missing} question(s) remain.`);return}if(!confirm('Submit your exam now? You cannot change answers after final submission.'))return;const b=document.getElementById('finish');b.disabled=true;try{const r=await api('/api/final-submit',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});const d=await r.json();if(!r.ok){message(d.error||'Could not submit exam.');return}await showResult()}catch(e){message('Network error. Please try again.')}finally{b.disabled=finalized}};
+document.getElementById('logout').onclick=async()=>{await api('/api/logout',{method:'POST'});location.href='/'};init();
+</script></body></html>''' 
 
 ADMIN_LOGIN=r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sunrise Staff Login</title><style>body{background:#0b1220;color:#e8eef8;font:16px system-ui;display:grid;place-items:center;min-height:100vh;margin:0;padding:20px}.card{background:#111c30;padding:24px;border:1px solid #263750;border-radius:14px;width:min(100%,440px)}input{width:100%;box-sizing:border-box;padding:12px;margin:8px 0;background:#09111f;color:#fff;border:1px solid #354965;border-radius:8px}button{padding:12px;width:100%;background:#58d5b3;border:0;border-radius:8px;font-weight:bold}.error{color:#fecdd3}.muted{color:#9aaec8;font-size:14px}</style></head><body><div class="card"><h1>Sunrise Staff Login</h1><p class="muted">Use your assigned staff username and password.</p><form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><label>Username</label><input name="username" autocomplete="username" maxlength="80" required><label>Password</label><input type="password" name="password" autocomplete="current-password" required><button>Sign in</button></form>{% if error %}<p class="error">{{error}}</p>{% endif %}</div></body></html>'''
 
@@ -270,23 +299,53 @@ body{margin:0;background:#0b1220;color:#e8eef8;font:15px/1.5 system-ui,Arial;pad
 <h1>Sunrise CTF — Staff Dashboard</h1><p class="muted">Signed in as {{staff.full_name}} · {{role_label}}</p><div class="nav">{% if can_questions %}<a href="/admin/questions">Manage question bank</a><a href="/admin/answer-key.json">Download answer key</a><a href="/admin/questions/export.json">Export question bank</a>{% endif %}{% if can_results %}<a href="/admin/export.csv">Export results CSV</a>{% endif %}{% if can_users %}<a href="/admin/users">Manage users & roles</a>{% endif %}<a href="/admin/logout">Logout</a></div>
 <div class="alert">Keep this portal, the private .env file, application source and answer keys away from students. Avoid editing question content during a live exam; changes affect both level portals immediately.</div>
 {% if can_students %}<div class="card"><h2>Create candidate student</h2><form method="post" action="/admin/create"><input type="hidden" name="csrf" value="{{csrf}}"><input name="candidate_id" placeholder="Candidate ID (e.g. STU-001)" maxlength="80" required><input name="name" placeholder="Candidate name" maxlength="120" required><label>Exam access</label><label><input type="checkbox" name="allowed_levels" value="level1" checked> Level 1 — Ethical Hacking</label><label><input type="checkbox" name="allowed_levels" value="level2"> Level 2 — Penetration Testing</label><button>Create candidate + PIN</button></form>{% if new_candidate %}<div class="success"><b>Candidate:</b> {{new_candidate.candidate_id}} — {{new_candidate.name}}<br><b>PIN (shown once):</b> <code>{{new_candidate.pin}}</code></div>{% endif %}{% if error %}<p style="color:#fecdd3">{{error}}</p>{% endif %}</div>{% endif %}
-{% if can_results %}<div class="card"><h2>Candidate results</h2><table><thead><tr><th>Candidate</th><th>Level 1</th><th>Level 2</th><th>Latest activity</th></tr></thead><tbody>{% for r in results %}<tr><td>{{r.candidate_id}}<br>{{r.name}}</td><td>{{r.l1_solved}} solved · {{r.l1_points}} points{% if r.l1_deadline %}<br><span class="muted">Deadline {{r.l1_deadline}}</span>{% endif %}</td><td>{{r.l2_solved}} solved · {{r.l2_points}} points{% if r.l2_deadline %}<br><span class="muted">Deadline {{r.l2_deadline}}</span>{% endif %}</td><td>{{r.last_activity or 'No submissions'}}</td></tr>{% endfor %}</tbody></table></div>{% endif %}
+{% if can_results %}<div class="card"><h2>Candidate results</h2><table><thead><tr><th>Candidate</th><th>Level 1</th><th>Level 2</th><th>Latest activity</th></tr></thead><tbody>{% for r in results %}<tr><td>{{r.candidate_id}}<br>{{r.name}}</td><td>{% if r.l1_percentage is not none %}<b>{{'PASS' if r.l1_passed else 'FAIL'}}</b> · {{'%.1f'|format(r.l1_percentage)}}%<br>{{r.l1_points}} / {{r.l1_max}} points{% else %}<span class="muted">Not submitted</span>{% endif %}</td><td>{% if r.l2_percentage is not none %}<b>{{'PASS' if r.l2_passed else 'FAIL'}}</b> · {{'%.1f'|format(r.l2_percentage)}}%<br>{{r.l2_points}} / {{r.l2_max}} points{% else %}<span class="muted">Not submitted</span>{% endif %}</td><td>{{r.last_activity or 'No submissions'}}</td></tr>{% endfor %}</tbody></table></div>{% endif %}
 {% if can_questions %}<div class="card"><h2>Question bank summary</h2><p>Level 1: <b>{{l1_count}}</b> active / {{l1_all}} total questions. Level 2: <b>{{l2_count}}</b> active / {{l2_all}} total questions.</p><p>Supported types: flag, short text, single-choice MCQ, multiple-choice MCQ, and true/false.</p><a class="btn" href="/admin/questions">Add or modify questions</a></div>{% endif %}</main></body></html>'''
 
-QUESTION_ADMIN=r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Manage Questions</title><style>
-body{margin:0;background:#0b1220;color:#e8eef8;font:15px/1.5 system-ui,Arial;padding:20px}main{max-width:1300px;margin:auto}.card{background:#111c30;border:1px solid #263750;border-radius:14px;padding:18px;margin:14px 0}input,select,textarea{width:100%;box-sizing:border-box;padding:10px;background:#09111f;color:#fff;border:1px solid #354965;border-radius:8px;margin:5px 0 12px;font:inherit}textarea{min-height:90px}label{display:block;color:#c8d5e8;font-size:14px}button,.btn{padding:10px 14px;border:0;border-radius:8px;background:#58d5b3;color:#08231c;font-weight:bold;cursor:pointer}button.danger{background:#b83350;color:#fff}table{width:100%;border-collapse:collapse}td,th{text-align:left;border-bottom:1px solid #263750;padding:8px;vertical-align:top}.muted{color:#9aaec8}.alert{background:#3d321a;color:#f9e7a5;padding:12px;border-radius:8px}.error{background:#4a1d2a;color:#fecdd3;padding:12px;border-radius:8px}.success{background:#123f31;color:#a7f3d0;padding:12px;border-radius:8px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}a{color:#9be8d2}.small{font-size:12px;color:#9aaec8}@media(max-width:760px){.grid{grid-template-columns:1fr}table{font-size:13px}}
-</style></head><body><main><h1>Question Bank Management</h1><p><a href="/admin">← Instructor dashboard</a> · <a href="/admin/logout">Logout</a></p><div class="alert">Changes take effect immediately on both portals. Do not edit or delete questions while students are sitting the exam. Back up the database before bulk changes.</div>{% if message %}<div class="success">{{message}}</div>{% endif %}{% if error %}<div class="error">{{error}}</div>{% endif %}
-<div class="card"><h2>{% if edit %}Edit question #{{edit.id}}{% else %}Add a question{% endif %}</h2><form method="post" action="/admin/questions/save"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="id" value="{{edit.id if edit else ''}}"><div class="grid"><div><label>Level</label><select name="level" {% if edit %}disabled{% endif %}><option value="level1" {% if not edit or edit.level=='level1' %}selected{% endif %}>Level 1 — Ethical Hacking</option><option value="level2" {% if edit and edit.level=='level2' %}selected{% endif %}>Level 2 — Penetration Testing</option></select>{% if edit %}<input type="hidden" name="level" value="{{edit.level}}">{% endif %}</div><div><label>Question type</label><select name="qtype" id="qtype" onchange="showHelp()"><option value="flag" {% if edit and edit.qtype=='flag' %}selected{% endif %}>Flag-based</option><option value="short_text" {% if edit and edit.qtype=='short_text' %}selected{% endif %}>Short text</option><option value="single_choice" {% if edit and edit.qtype=='single_choice' %}selected{% endif %}>Single-choice MCQ</option><option value="multiple_choice" {% if edit and edit.qtype=='multiple_choice' %}selected{% endif %}>Multiple-choice MCQ</option><option value="true_false" {% if edit and edit.qtype=='true_false' %}selected{% endif %}>True / False</option></select></div><div><label>Title</label><input name="title" required maxlength="160" value="{{edit.title if edit else ''}}" placeholder="Challenge title"></div><div><label>Category / topic</label><input name="category" maxlength="100" value="{{edit.category if edit else 'General'}}" placeholder="e.g. XSS"></div><div><label>Points (1–10,000)</label><input type="number" name="points" min="1" max="10000" required value="{{edit.points if edit else 100}}"></div><div><label>Availability</label><select name="active"><option value="1" {% if not edit or edit.active %}selected{% endif %}>Active — visible to students</option><option value="0" {% if edit and not edit.active %}selected{% endif %}>Draft / inactive</option></select></div></div><label>Scenario / question instructions</label><textarea name="prompt" required maxlength="12000" placeholder="Write a self-contained challenge, including evidence or target instructions.">{{edit.prompt if edit else ''}}</textarea><div id="optionsWrap"><label>Options JSON (MCQ only)</label><textarea name="options_json" id="options_json" spellcheck="false">{{options_json}}</textarea><div class="small">Example: [{&quot;value&quot;:&quot;A&quot;,&quot;label&quot;:&quot;Option A&quot;},{&quot;value&quot;:&quot;B&quot;,&quot;label&quot;:&quot;Option B&quot;}]</div></div><label>Correct answer / accepted answer(s)</label><textarea name="answer" required spellcheck="false" placeholder="Flag: SUNRISE{answer}; MCQ: option value A; multi-choice: A,C; short text: one accepted answer per line; true/false: true or false">{{edit_answer}}</textarea><div id="help" class="small">Flag: enter the exact expected flag. Short text: one accepted answer per line. MCQ options are JSON. Multiple-choice correct values are comma-separated. True/False: enter true or false.</div><div class="actions"><button type="submit">{% if edit %}Save changes{% else %}Add question{% endif %}</button><a class="btn" href="/admin/questions">Clear / new question</a></div></form></div>
-<div class="card"><h2>Existing questions ({{questions|length}})</h2><form method="get"><label>Filter by level</label><select name="level" onchange="this.form.submit()"><option value="all" {% if level_filter=='all' %}selected{% endif %}>Both levels</option><option value="level1" {% if level_filter=='level1' %}selected{% endif %}>Level 1</option><option value="level2" {% if level_filter=='level2' %}selected{% endif %}>Level 2</option></select></form><div style="overflow-x:auto"><table><thead><tr><th>ID</th><th>Level</th><th>Question</th><th>Type</th><th>Points</th><th>Status</th><th>Actions</th></tr></thead><tbody>{% for q in questions %}<tr><td>{{q.id}}</td><td>{{q.level}}</td><td><b>{{q.title}}</b><br><span class="muted">{{q.category}}</span></td><td>{{q.qtype}}</td><td>{{q.points}}</td><td>{{'Active' if q.active else 'Draft'}}</td><td><div class="actions"><a class="btn" href="/admin/questions?edit={{q.id}}&level={{level_filter}}">Edit</a><form method="post" action="/admin/questions/delete" onsubmit="return confirm('Delete this question? This cannot be undone.');"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="id" value="{{q.id}}"><button class="danger">Delete</button></form></div></td></tr>{% endfor %}</tbody></table></div></div></main><script>function showHelp(){const t=document.getElementById('qtype').value;document.getElementById('optionsWrap').style.display=['single_choice','multiple_choice'].includes(t)?'block':'none';const help={flag:'Enter the expected flag exactly. Student answers are trimmed and compared case-insensitively.',short_text:'Enter accepted answers one per line. Matching ignores surrounding whitespace and letter case.',single_choice:'Options JSON is a list of value/label objects. Correct answer must be one option value.',multiple_choice:'Options JSON is a list of value/label objects. Enter all correct option values separated by commas, e.g. A,C.',true_false:'Enter true or false. Options are generated automatically.'};document.getElementById('help').textContent=help[t]}showHelp();</script></body></html>'''
+QUESTION_ADMIN=r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sunrise Question Manager</title><style>
+:root{--bg:#0b1220;--panel:#111c30;--line:#263750;--text:#e8eef8;--muted:#9aaec8;--accent:#58d5b3}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,Arial;padding:20px}main{max-width:1320px;margin:auto}.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:20px;margin:16px 0}input,select,textarea{width:100%;box-sizing:border-box;padding:11px;background:#09111f;color:#fff;border:1px solid #354965;border-radius:9px;margin:5px 0 12px;font:inherit}textarea{min-height:110px}label{display:block;color:#c8d5e8;font-size:14px}button,.btn{padding:10px 14px;border:0;border-radius:9px;background:var(--accent);color:#08231c;font-weight:750;cursor:pointer;text-decoration:none;display:inline-block}button.danger{background:#b83350;color:white}.muted,.small{color:var(--muted);font-size:13px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.option-row{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;padding:10px;border:1px solid var(--line);border-radius:10px;margin:8px 0}.option-row input[type=checkbox],.option-row input[type=radio]{width:auto;margin:0}.actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.success{background:#123f31;color:#a7f3d0;padding:12px;border-radius:8px}.error{background:#4a1d2a;color:#fecdd3;padding:12px;border-radius:8px}.notice{background:#3d321a;color:#f9e7a5;padding:12px;border-radius:8px}table{width:100%;border-collapse:collapse}td,th{text-align:left;border-bottom:1px solid var(--line);padding:9px;vertical-align:top}.table-wrap{overflow-x:auto}@media(max-width:760px){.grid{grid-template-columns:1fr}.option-row{grid-template-columns:1fr auto auto}table{font-size:13px}}
+</style></head><body><main><h1>Question Bank</h1><p><a href="/admin">← Admin dashboard</a> · <a href="/admin/logout">Sign out</a></p><p class="muted">Choose a level, create as many questions as you need, and edit them using simple form fields. Changes appear in that level's student exam.</p>{% if message %}<div class="success">{{message}}</div>{% endif %}{% if error %}<div class="error">{{error}}</div>{% endif %}
+<section class="card"><h2>{% if edit %}Edit question #{{edit.id}}{% else %}Add a question{% endif %}</h2><form id="questionForm" method="post" action="/admin/questions/save"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="id" value="{{edit.id if edit else ''}}"><input type="hidden" name="options_json" id="options_json"><input type="hidden" name="answer" id="answer_hidden"><div class="grid"><div><label>Exam level</label><select name="level" id="level" {% if edit %}disabled{% endif %}><option value="level1" {% if not edit or edit.level=='level1' %}selected{% endif %}>Level 1 — Ethical Hacking</option><option value="level2" {% if edit and edit.level=='level2' %}selected{% endif %}>Level 2 — Penetration Testing</option></select>{% if edit %}<input type="hidden" name="level" value="{{edit.level}}">{% endif %}</div><div><label>Question type</label><select name="qtype" id="qtype" onchange="updateType()"><option value="flag" {% if edit and edit.qtype=='flag' %}selected{% endif %}>Flag / CTF answer</option><option value="short_text" {% if edit and edit.qtype=='short_text' %}selected{% endif %}>Short text</option><option value="single_choice" {% if edit and edit.qtype=='single_choice' %}selected{% endif %}>Multiple choice — one answer</option><option value="multiple_choice" {% if edit and edit.qtype=='multiple_choice' %}selected{% endif %}>Multiple choice — several answers</option><option value="true_false" {% if edit and edit.qtype=='true_false' %}selected{% endif %}>True / False</option></select></div><div><label>Question title</label><input name="title" required maxlength="160" value="{{edit.title if edit else ''}}" placeholder="e.g. Identify the protocol"></div><div><label>Topic / category</label><input name="category" maxlength="100" value="{{edit.category if edit else 'General'}}" placeholder="e.g. Web Security"></div><div><label>Points</label><input type="number" name="points" min="1" max="10000" required value="{{edit.points if edit else 100}}"></div><div><label>Student visibility</label><select name="active"><option value="1" {% if not edit or edit.active %}selected{% endif %}>Published — visible to students</option><option value="0" {% if edit and not edit.active %}selected{% endif %}>Draft — hidden from students</option></select></div></div><label>Question instructions / scenario</label><textarea name="prompt" required maxlength="12000" placeholder="Write the question and any instructions the student needs.">{{edit.prompt if edit else ''}}</textarea>
+<div id="mcqBuilder" class="card" style="margin:10px 0;display:none"><h3>Answer options</h3><p class="small">Write each option in a separate field. Tick the correct option(s). Students will not see which answer is correct during the exam.</p><div id="optionRows"></div><div class="actions"><button type="button" id="addOption" class="btn">+ Add option</button></div></div>
+<div id="textAnswerWrap"><label id="answerLabel">Expected answer / flag</label><textarea id="textAnswer" placeholder="Enter the expected flag or accepted text answers. For short text, put each accepted answer on a new line.">{{edit_answer}}</textarea><p id="answerHelp" class="small">For flags, enter the expected flag. For short text, accepted answers can be entered one per line.</p></div><div id="trueFalseWrap" style="display:none"><label>Correct answer</label><select id="trueFalseAnswer"><option value="true">True</option><option value="false">False</option></select><p class="small">Choose the correct response.</p></div>
+<div class="actions"><button type="submit">{% if edit %}Save changes{% else %}Add question{% endif %}</button><a class="btn" href="/admin/questions?level={{level_filter if level_filter in ['level1','level2'] else 'level1'}}">Cancel / add another</a></div></form></section>
+<section class="card"><h2>Questions ({{questions|length}})</h2><form method="get"><label>Show questions for</label><select name="level" onchange="this.form.submit()"><option value="all" {% if level_filter=='all' %}selected{% endif %}>Both levels</option><option value="level1" {% if level_filter=='level1' %}selected{% endif %}>Level 1 — Ethical Hacking</option><option value="level2" {% if level_filter=='level2' %}selected{% endif %}>Level 2 — Penetration Testing</option></select></form><div class="table-wrap"><table><thead><tr><th>Number</th><th>Level</th><th>Question</th><th>Type</th><th>Points</th><th>Status</th><th>Actions</th></tr></thead><tbody>{% for q in questions %}<tr><td>{{loop.index}}</td><td>{{'Level 1' if q.level=='level1' else 'Level 2'}}</td><td><b>{{q.title}}</b><br><span class="muted">{{q.category}}</span></td><td>{{q.qtype.replace('_',' ')}}</td><td>{{q.points}}</td><td>{{'Published' if q.active else 'Draft'}}</td><td><div class="actions"><a class="btn" href="/admin/questions?edit={{q.id}}&level={{level_filter}}">Edit</a><form method="post" action="/admin/questions/delete" onsubmit="return confirm('Delete this question? This cannot be undone.');"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="id" value="{{q.id}}"><button type="submit" class="danger">Delete</button></form></div></td></tr>{% else %}<tr><td colspan="7">No questions yet. Use the form above to add your first question.</td></tr>{% endfor %}</tbody></table></div></section></main>
+<script>
+const initialOptions={{options_data|tojson}};const initialAnswer={{answer_data|tojson}};const rows=document.getElementById('optionRows');
+function letter(i){return String.fromCharCode(65+i)}
+function addOption(label='',value='',correct=false){if(rows.children.length>=50){alert('A question can have up to 50 options.');return}const idx=rows.children.length;const row=document.createElement('div');row.className='option-row';row.dataset.value=value||letter(idx);const input=document.createElement('input');input.type='text';input.className='option-label';input.placeholder='Option '+letter(idx);input.maxLength=500;input.value=label;const choose=document.createElement('label');choose.style.display='flex';choose.style.gap='6px';choose.style.alignItems='center';const check=document.createElement('input');check.type='checkbox';check.className='correct-option';check.checked=correct;check.onchange=()=>{if(document.getElementById('qtype').value==='single_choice'&&check.checked)[...rows.querySelectorAll('.correct-option')].forEach(other=>{if(other!==check)other.checked=false})};choose.append(check,document.createTextNode('Correct'));const remove=document.createElement('button');remove.type='button';remove.className='danger';remove.textContent='Remove';remove.onclick=()=>{row.remove();renumber()};row.append(input,choose,remove);rows.append(row)}
+function renumber(){[...rows.children].forEach((row,i)=>{row.dataset.value=letter(i);row.querySelector('.option-label').placeholder='Option '+letter(i)})}
+function updateType(){const t=document.getElementById('qtype').value;const mcq=['single_choice','multiple_choice'].includes(t);document.getElementById('mcqBuilder').style.display=mcq?'block':'none';document.getElementById('textAnswerWrap').style.display=(!mcq&&t!=='true_false')?'block':'none';document.getElementById('trueFalseWrap').style.display=t==='true_false'?'block':'none';if(t==='true_false'){document.getElementById('trueFalseAnswer').value=String(initialAnswer||'true').toLowerCase()}else if(t==='flag'){document.getElementById('answerLabel').textContent='Expected flag';document.getElementById('answerHelp').textContent='Enter the exact expected flag. Students will not receive correctness feedback.'}else if(t==='short_text'){document.getElementById('answerLabel').textContent='Accepted text answers';document.getElementById('answerHelp').textContent='Enter one accepted answer per line.'}}
+document.getElementById('addOption').onclick=()=>addOption();
+if(initialOptions.length){const correctVals=Array.isArray(initialAnswer)?initialAnswer.map(String):String(initialAnswer||'').split(',').map(x=>x.trim());initialOptions.forEach(o=>addOption(o.label,o.value,correctVals.includes(String(o.value))))}else{addOption();addOption();addOption();addOption()}
+updateType();
+document.getElementById('questionForm').onsubmit=e=>{const t=document.getElementById('qtype').value;if(['single_choice','multiple_choice'].includes(t)){const all=[...rows.children].map((row,i)=>({value:letter(i),label:row.querySelector('.option-label').value.trim(),correct:row.querySelector('.correct-option').checked}));if(all.length<2||all.some(x=>!x.label)){e.preventDefault();alert('Add at least two options and fill in each option.');return}const chosen=all.filter(x=>x.correct).map(x=>x.value);if(!chosen.length||(t==='single_choice'&&chosen.length!==1)){e.preventDefault();alert(t==='single_choice'?'Select exactly one correct option.':'Select at least one correct option.');return}document.getElementById('options_json').value=JSON.stringify(all.map(x=>({value:x.value,label:x.label})));document.getElementById('answer_hidden').value=t==='single_choice'?chosen[0]:chosen.join(',')}else{document.getElementById('options_json').value='[]';let ans=t==='true_false'?document.getElementById('trueFalseAnswer').value:document.getElementById('textAnswer').value.trim();if(!ans){e.preventDefault();alert('Enter the expected answer.');return}document.getElementById('answer_hidden').value=ans}};
+</script></body></html>'''
 
+LEVEL_PICKER_HTML=r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Choose exam level</title><style>body{margin:0;background:#0b1220;color:#e8eef8;font:16px system-ui;min-height:100vh;display:grid;place-items:center;padding:20px}.card{width:min(100%,620px);background:#111c30;border:1px solid #263750;border-radius:18px;padding:28px}a{color:#9be8d2}.levels{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:22px 0}.level{display:block;padding:22px;border:1px solid #354965;border-radius:14px;background:#17253b;color:#fff;width:100%;font:inherit}.muted{color:#9aaec8}</style></head><body><section class="card"><h1>Choose your exam</h1><p class="muted">Welcome, {{candidate_name}}. Select one of the levels assigned to your account.</p><div class="levels">{% for lev in levels %}<form method="post" action="/select-level"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="level" value="{{lev}}"><button class="level" type="submit">{{titles[lev]}}<br><small>Open exam →</small></button></form>{% endfor %}</div><p><a href="/logout">Sign out</a></p></section></body></html>'''
+RESULT_HTML=r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Exam result</title><style>body{margin:0;background:#0b1220;color:#e8eef8;font:16px system-ui;min-height:100vh;display:grid;place-items:center;padding:20px}.card{width:min(100%,560px);background:#111c30;border:1px solid #263750;border-radius:18px;padding:30px;text-align:center}.score{font-size:48px;font-weight:800;margin:12px}.pass{color:#58d5b3}.fail{color:#fecdd3}.muted{color:#9aaec8}a{color:#9be8d2}</style></head><body><section class="card"><h1>Exam submitted</h1><p class="muted">{{level_title}}</p><div class="score">{{'%.1f'|format(result.percentage)}}%</div><h2 class="{{'pass' if result.passed else 'fail'}}">{{'PASS' if result.passed else 'FAIL'}}</h2><p>Score: <b>{{result.score}} / {{result.max_score}}</b></p><p>Passing requirement: 70%</p><p><a href="/choose-level">Return to level selection</a> · <a href="/logout">Sign out</a></p></section></body></html>'''
 @app.get('/')
 def index():
     if session.get('staff_user_id'): return redirect('/admin')
     cid=session.get('candidate_id')
-    if not cid or not candidate_info(cid): return render_template_string(LOGIN_HTML,csrf=csrf_token(),level_title=LEVEL_TITLES[LEVEL])
+    if not cid or not candidate_info(cid):
+        title = "Sign in to access your assigned exam" if LEVEL == "both" else LEVEL_TITLES[LEVEL]
+        return render_template_string(LOGIN_HTML,csrf=csrf_token(),level_title=title)
+    allowed=[x for x in allowed_levels_for(cid) if LEVEL=='both' or x==LEVEL]
+    if not allowed:
+        session.clear(); return render_template_string(LOGIN_HTML,csrf=csrf_token(),level_title="No exam levels assigned")
+    lev=active_level()
+    if not lev or lev not in allowed:
+        if len(allowed)==1: session['exam_level']=allowed[0]; lev=allowed[0]
+        else: return render_template_string(LEVEL_PICKER_HTML,csrf=csrf_token(),candidate_name=candidate_info(cid)['name'],levels=allowed,titles=LEVEL_TITLES)
+    with db() as con: result=con.execute("SELECT score,max_score,percentage,passed,submitted_at FROM exam_results WHERE candidate_id=? AND level=?",(cid,lev)).fetchone()
+    if result: return render_template_string(RESULT_HTML,level_title=LEVEL_TITLES[lev],result=dict(result))
     ci=candidate_info(cid)
-    return render_template_string(EXAM_HTML,csrf=csrf_token(),level_title=LEVEL_TITLES[LEVEL],candidate_name=ci['name'],candidate_id=ci['candidate_id'])
-
+    return render_template_string(EXAM_HTML,csrf=csrf_token(),level_title=LEVEL_TITLES[lev],candidate_name=ci['name'],candidate_id=ci['candidate_id'])
+@app.get('/choose-level')
+def choose_level_page():
+    session.pop('exam_level',None)
+    return redirect('/')
 @app.post('/api/login')
 def login():
     if not check_csrf(): return jsonify({'error':'Session expired. Refresh and try again.'}),400
@@ -295,57 +354,91 @@ def login():
     with db() as con: row=con.execute('SELECT candidate_id,name,pin_salt,pin_hash,active,allowed_levels FROM candidates WHERE candidate_id=?',(cid,)).fetchone()
     if not row or not row['active'] or not hmac.compare_digest(pin_hash(pin,row['pin_salt']),row['pin_hash']):
         time.sleep(0.25); return jsonify({'error':'Candidate ID or PIN is incorrect.'}),401
-    if LEVEL not in (row['allowed_levels'] or '').split(','):
-        time.sleep(0.15); return jsonify({'error':'You are not assigned to this exam level. Contact the exam administrator.'}),403
+    allowed=[x for x in (row['allowed_levels'] or '').split(',') if x in ('level1','level2') and (LEVEL=='both' or x==LEVEL)]
+    if not allowed: return jsonify({'error':'You are not assigned to an available exam level. Contact the exam administrator.'}),403
     session.clear(); session['candidate_id']=row['candidate_id']; session['csrf']=secrets.token_urlsafe(24); session.permanent=True
-    return jsonify({'ok':True})
-
+    if len(allowed)==1: session['exam_level']=allowed[0]
+    return jsonify({'ok':True,'choose_level':len(allowed)>1})
+@app.post('/select-level')
+def select_level():
+    if not check_csrf(request.form.get('csrf')): return redirect('/?error=Session+expired')
+    cid=session.get('candidate_id'); lev=request.form.get('level','')
+    if not cid or lev not in ('level1','level2') or (LEVEL!='both' and lev!=LEVEL) or lev not in allowed_levels_for(cid): return redirect('/')
+    session['exam_level']=lev; return redirect('/')
 @app.post('/api/logout')
-def logout():
+def logout_api():
     if not check_csrf(): return jsonify({'error':'Invalid request.'}),400
     session.clear(); return jsonify({'ok':True})
-
+@app.get('/logout')
+def logout_page():
+    session.clear(); return redirect('/')
 @app.get('/api/challenges')
 @student_required
 def list_challenges():
-    cid=session['candidate_id']; status=exam_status(cid,start=True); questions=get_questions(LEVEL)
+    cid=session['candidate_id']; lev=active_level(); status=exam_status(cid,start=True,level=lev); questions=get_questions(lev)
     with db() as con:
-        solved_rows=con.execute('SELECT s.challenge_id,q.points AS points FROM solves s JOIN questions q ON q.id=s.challenge_id AND q.level=s.level WHERE s.candidate_id=? AND s.level=? AND q.active=1',(cid,LEVEL)).fetchall()
-    solved=[r['challenge_id'] for r in solved_rows]; points=sum(int(r['points']) for r in solved_rows); max_points=sum(int(q['points']) for q in questions)
-    return jsonify({'questions':[{'id':q['id'],'title':q['title'],'qtype':q['qtype'],'points':q['points']} for q in questions], 'total':len(questions),'solved':solved,'points':points,'max_points':max_points,'deadline_at':status['deadline_at'],'expired':status['expired']})
-
+        answered_rows=con.execute('SELECT question_id FROM exam_answers WHERE candidate_id=? AND level=?',(cid,lev)).fetchall()
+        result=con.execute('SELECT 1 FROM exam_results WHERE candidate_id=? AND level=?',(cid,lev)).fetchone()
+    answered=[r['question_id'] for r in answered_rows]
+    return jsonify({'questions':[{'id':q['id'],'title':q['title'],'qtype':q['qtype'],'points':q['points']} for q in questions], 'total':len(questions),'answered':answered,'max_points':sum(int(q['points']) for q in questions),'deadline_at':status['deadline_at'],'expired':status['expired'],'finalized':bool(result),'level':lev})
 @app.get('/api/challenge/<int:question_id>')
 @student_required
 def get_challenge(question_id):
-    status=exam_status(session['candidate_id'],start=True)
+    lev=active_level(); cid=session['candidate_id']; status=exam_status(cid,start=True,level=lev)
     if status['expired']: return jsonify({'expired':True,'error':'Exam time has ended.'}),403
-    q=get_question(question_id)
-    if not q: return jsonify({'error':'Challenge not found.'}),404
-    with db() as con: solved=con.execute('SELECT 1 FROM solves WHERE candidate_id=? AND level=? AND challenge_id=?',(session['candidate_id'],LEVEL,question_id)).fetchone() is not None
-    return jsonify(public_question(q,solved))
-
+    q=get_question(question_id,lev)
+    if not q: return jsonify({'error':'Question not found.'}),404
+    with db() as con:
+        saved=con.execute('SELECT answer_json FROM exam_answers WHERE candidate_id=? AND level=? AND question_id=?',(cid,lev,question_id)).fetchone()
+        final=con.execute('SELECT 1 FROM exam_results WHERE candidate_id=? AND level=?',(cid,lev)).fetchone()
+    data=public_question(q,False); data['saved_answer']=json.loads(saved['answer_json']) if saved else None; data['finalized']=bool(final)
+    return jsonify(data)
 @app.post('/api/submit')
 @student_required
 def submit():
     if not check_csrf(): return jsonify({'error':'Invalid request token. Refresh the page.'}),400
+    if getattr(request,'exam_finalized',False): return jsonify({'error':'This exam has already been submitted.'}),409
     body=request.get_json(silent=True) or {}
     try: qid=int(body.get('id',0))
     except (TypeError,ValueError): return jsonify({'error':'Invalid question.'}),400
-    q=get_question(qid)
+    lev=active_level(); cid=session['candidate_id']; q=get_question(qid,lev)
     if not q: return jsonify({'error':'Question not found or inactive.'}),400
-    status=exam_status(session['candidate_id'],start=True)
-    if status['expired']: return jsonify({'expired':True,'correct':False,'error':'Exam time has ended.'}),403
-    cid=session['candidate_id']; now=utcnow()
+    status=exam_status(cid,start=True,level=lev)
+    if status['expired']: return jsonify({'expired':True,'error':'Time has ended. Submit the exam for your result.'}),403
+    answer=body.get('answer',body.get('flag',''))
+    if isinstance(answer,str): answer=answer.strip()
+    if answer in ('',[],None): return jsonify({'error':'Enter or select an answer before saving.'}),400
     with db() as con:
-        recent=con.execute('SELECT COUNT(*) n FROM submissions WHERE candidate_id=? AND level=? AND submitted_at>=?',(cid,LEVEL,iso(now-timedelta(seconds=60)))).fetchone()['n']
-        if recent>=30: return jsonify({'error':'Rate limit reached. Wait before trying again.'}),429
-        answer=body.get('answer',body.get('flag',''))
-        correct=answers_match(q,answer)
-        con.execute('INSERT INTO submissions(candidate_id,level,challenge_id,correct,submitted_at) VALUES(?,?,?,?,?)',(cid,LEVEL,qid,1 if correct else 0,iso(now)))
-        if correct: con.execute('INSERT OR IGNORE INTO solves(candidate_id,level,challenge_id,points,solved_at) VALUES(?,?,?,?,?)',(cid,LEVEL,qid,q['points'],iso(now)))
-        rows=con.execute('SELECT s.challenge_id,q.points AS points FROM solves s JOIN questions q ON q.id=s.challenge_id AND q.level=s.level WHERE s.candidate_id=? AND s.level=? AND q.active=1',(cid,LEVEL)).fetchall()
-        points=sum(r['points'] for r in rows); max_points=con.execute('SELECT COALESCE(SUM(points),0) n FROM questions WHERE level=? AND active=1',(LEVEL,)).fetchone()['n']
-    return jsonify({'correct':correct,'expired':False,'points':points,'max_points':max_points})
+        con.execute('INSERT INTO exam_answers(candidate_id,level,question_id,answer_json,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(candidate_id,level,question_id) DO UPDATE SET answer_json=excluded.answer_json,updated_at=excluded.updated_at',(cid,lev,qid,json.dumps(answer,ensure_ascii=False),iso(utcnow())))
+        con.execute('INSERT INTO submissions(candidate_id,level,challenge_id,correct,submitted_at) VALUES(?,?,?,?,?)',(cid,lev,qid,0,iso(utcnow())))
+        answered=con.execute('SELECT COUNT(*) n FROM exam_answers WHERE candidate_id=? AND level=?',(cid,lev)).fetchone()['n']
+        total=con.execute('SELECT COUNT(*) n FROM questions WHERE level=? AND active=1',(lev,)).fetchone()['n']
+    return jsonify({'saved':True,'answered':answered,'total':total,'message':'Answer saved.'})
+@app.get('/api/result')
+@student_required
+def get_result():
+    with db() as con: row=con.execute('SELECT score,max_score,percentage,passed,submitted_at FROM exam_results WHERE candidate_id=? AND level=?',(session['candidate_id'],active_level())).fetchone()
+    return jsonify({'result':dict(row) if row else None})
+@app.post('/api/final-submit')
+@student_required
+def final_submit():
+    if not check_csrf(): return jsonify({'error':'Invalid request token.'}),400
+    cid=session['candidate_id']; lev=active_level(); now=iso(utcnow())
+    with db() as con:
+        prior=con.execute('SELECT score,max_score,percentage,passed,submitted_at FROM exam_results WHERE candidate_id=? AND level=?',(cid,lev)).fetchone()
+        if prior: return jsonify({'ok':True,'result':dict(prior),'already_submitted':True})
+        qs=con.execute('SELECT * FROM questions WHERE level=? AND active=1 ORDER BY id',(lev,)).fetchall()
+        saved={r['question_id']:json.loads(r['answer_json']) for r in con.execute('SELECT question_id,answer_json FROM exam_answers WHERE candidate_id=? AND level=?',(cid,lev)).fetchall()}
+        answered=sum(1 for q in qs if q['id'] in saved and saved[q['id']] not in ('',[],None))
+        status=exam_status(cid,start=False,level=lev)
+        if answered<len(qs) and not status['expired']:
+            return jsonify({'error':f'Please answer all questions before final submission. Answered {answered} of {len(qs)}.'}),400
+        score=0; max_score=sum(int(q['points']) for q in qs)
+        for q in qs:
+            if q['id'] in saved and answers_match(dict(q),saved[q['id']]): score += int(q['points'])
+        pct=(score/max_score*100) if max_score else 0.0; passed=1 if pct>=70.0 else 0
+        con.execute('INSERT INTO exam_results(candidate_id,level,score,max_score,percentage,passed,submitted_at) VALUES(?,?,?,?,?,?,?)',(cid,lev,score,max_score,pct,passed,now))
+    return jsonify({'ok':True,'result':{'score':score,'max_score':max_score,'percentage':pct,'passed':passed,'submitted_at':now}})
 
 @app.get('/admin/login')
 def admin_login_page(): return render_template_string(ADMIN_LOGIN,csrf=csrf_token(),error=None)
@@ -366,10 +459,17 @@ def admin_results():
         for c in candidates:
             row={'candidate_id':c['candidate_id'],'name':c['name']}
             for lev,prefix in (('level1','l1'),('level2','l2')):
-                stats=con.execute('SELECT COUNT(*) n,COALESCE(SUM(s.points),0) pts FROM solves s JOIN questions q ON q.id=s.challenge_id AND q.level=s.level WHERE s.candidate_id=? AND s.level=? AND q.active=1',(c['candidate_id'],lev)).fetchone()
+                res=con.execute('SELECT score,max_score,percentage,passed,submitted_at FROM exam_results WHERE candidate_id=? AND level=?',(c['candidate_id'],lev)).fetchone()
                 sess=con.execute('SELECT deadline_at FROM exam_sessions WHERE candidate_id=? AND level=?',(c['candidate_id'],lev)).fetchone()
-                row[prefix+'_solved']=stats['n']; row[prefix+'_points']=stats['pts']; row[prefix+'_deadline']=sess['deadline_at'] if sess else None
-            row['last_activity']=con.execute('SELECT MAX(submitted_at) t FROM submissions WHERE candidate_id=?',(c['candidate_id'],)).fetchone()['t']; results.append(row)
+                row[prefix+'_solved']=0
+                row[prefix+'_points']=res['score'] if res else 0
+                row[prefix+'_max']=res['max_score'] if res else 0
+                row[prefix+'_percentage']=res['percentage'] if res else None
+                row[prefix+'_passed']=res['passed'] if res else None
+                row[prefix+'_deadline']=sess['deadline_at'] if sess else None
+            row['last_activity']=con.execute('SELECT MAX(submitted_at) t FROM submissions WHERE candidate_id=?',(c['candidate_id'],)).fetchone()['t']
+            row['last_activity']=row['last_activity'] or con.execute('SELECT MAX(submitted_at) t FROM exam_results WHERE candidate_id=?',(c['candidate_id'],)).fetchone()['t']
+            results.append(row)
         return results
 
 def render_dashboard(new_candidate=None,error=None):
@@ -403,17 +503,17 @@ def admin_create():
 @app.get('/admin/questions')
 @permission_required('manage_questions')
 def admin_questions():
-    filt=request.args.get('level','all'); edit_id=request.args.get('edit',type=int); edit=None; edit_answer=''; options_json='[]'
+    filt=request.args.get('level','all'); edit_id=request.args.get('edit',type=int); edit=None; edit_answer=''; options_json='[]'; options_data=[]; answer_data=''
     with db() as con:
         if edit_id:
             r=con.execute('SELECT * FROM questions WHERE id=?',(edit_id,)).fetchone()
             if r:
-                edit=dict(r); options_json=json.dumps(json.loads(edit['options_json'] or '[]'),ensure_ascii=False,indent=2); ans=json.loads(edit['answer_json'])
+                edit=dict(r); options_data=json.loads(edit['options_json'] or '[]'); options_json=json.dumps(options_data,ensure_ascii=False); ans=json.loads(edit['answer_json']); answer_data=ans
                 edit_answer=(','.join(map(str,ans)) if edit['qtype']=='multiple_choice' else '\n'.join(map(str,ans))) if isinstance(ans,list) else str(ans)
         if filt in ('level1','level2'): rows=con.execute('SELECT * FROM questions WHERE level=? ORDER BY level,id',(filt,)).fetchall()
         else: rows=con.execute('SELECT * FROM questions ORDER BY level,id').fetchall(); filt='all'
     qs=[dict(r) for r in rows]
-    return render_template_string(QUESTION_ADMIN,csrf=csrf_token(),questions=qs,edit=edit,edit_answer=edit_answer,options_json=options_json,level_filter=filt,message=request.args.get('message'),error=request.args.get('error'))
+    return render_template_string(QUESTION_ADMIN,csrf=csrf_token(),questions=qs,edit=edit,edit_answer=edit_answer,options_json=options_json,options_data=options_data,answer_data=answer_data,level_filter=filt,message=request.args.get('message'),error=request.args.get('error'))
 
 @app.post('/admin/questions/save')
 @permission_required('manage_questions')
@@ -472,8 +572,8 @@ def admin_question_export():
 @app.get('/admin/export.csv')
 @permission_required('view_results')
 def admin_export():
-    out=io.StringIO(); w=csv.writer(out); w.writerow(['candidate_id','name','level1_solved','level1_points','level2_solved','level2_points','latest_activity'])
-    for r in admin_results(): w.writerow([r['candidate_id'],r['name'],r['l1_solved'],r['l1_points'],r['l2_solved'],r['l2_points'],r['last_activity'] or ''])
+    out=io.StringIO(); w=csv.writer(out); w.writerow(['candidate_id','name','level1_score','level1_max','level1_percentage','level1_result','level2_score','level2_max','level2_percentage','level2_result','latest_activity'])
+    for r in admin_results(): w.writerow([r['candidate_id'],r['name'],r['l1_points'],r['l1_max'],r['l1_percentage'] if r['l1_percentage'] is not None else '',('PASS' if r['l1_passed'] else 'FAIL') if r['l1_passed'] is not None else '',r['l2_points'],r['l2_max'],r['l2_percentage'] if r['l2_percentage'] is not None else '',('PASS' if r['l2_passed'] else 'FAIL') if r['l2_passed'] is not None else '',r['last_activity'] or ''])
     resp=make_response(out.getvalue()); resp.headers['Content-Type']='text/csv; charset=utf-8'; resp.headers['Content-Disposition']='attachment; filename="sunrise_ctf_results.csv"'; return resp
 @app.get('/admin/users')
 @permission_required('manage_users')
@@ -529,7 +629,7 @@ def admin_users_update():
     return redirect('/admin/users?message=User+updated')
 
 @app.post('/admin/users/student-access')
-@permission_required('manage_students')
+@permission_required('manage_users')
 def admin_student_access():
     if not check_csrf(request.form.get('csrf')): return redirect('/admin/users?error=Session+expired')
     cid=request.form.get('candidate_id','').strip()
@@ -542,26 +642,8 @@ def admin_student_access():
     audit('update_student_access',cid,'allowed_levels='+allowed_levels)
     return redirect('/admin/users?message=Student+exam+access+updated')
 
-@app.post('/admin/users/student-pin')
-@permission_required('manage_students')
-def admin_student_pin():
-    if not check_csrf(request.form.get('csrf')):
-        return redirect('/admin/users?error=Session+expired')
-    cid=request.form.get('candidate_id','').strip()
-    pin=request.form.get('new_pin','')
-    if not cid or len(pin)<4 or len(pin)>80:
-        return redirect('/admin/users?error=Student+PIN+must+be+4+to+80+characters')
-    salt=secrets.token_hex(16)
-    with db() as con:
-        cur=con.execute('UPDATE candidates SET pin_salt=?,pin_hash=? WHERE candidate_id=?',
-                        (salt,pin_hash(pin,salt),cid))
-        if cur.rowcount==0:
-            return redirect('/admin/users?error=Student+not+found')
-    audit('reset_student_pin',cid,'Student PIN reset by authorized staff')
-    return redirect('/admin/users?message=Student+PIN+updated')
-
 @app.post('/admin/users/student-status')
-@permission_required('manage_students')
+@permission_required('manage_users')
 def admin_student_status():
     if not check_csrf(request.form.get('csrf')): return redirect('/admin/users?error=Session+expired')
     cid=request.form.get('candidate_id','').strip(); active=1 if request.form.get('active')=='1' else 0
@@ -576,11 +658,12 @@ def admin_logout():
     if session.get('staff_user_id'): audit('logout','staff_user:'+str(session.get('staff_user_id')),'Staff logout')
     session.clear(); return redirect('/admin/login')
 @app.get('/health')
+@app.get('/healthz')
 def health():
     try:
         with db() as con:
-            con.execute('SELECT 1'); n=con.execute('SELECT COUNT(*) n FROM questions WHERE level=? AND active=1',(LEVEL,)).fetchone()['n']
-        return jsonify({'status':'ok','level':LEVEL,'active_questions':n})
+            con.execute('SELECT 1'); n=con.execute('SELECT COUNT(*) n FROM questions WHERE active=1').fetchone()['n']
+        return jsonify({'status':'ok','mode':LEVEL,'active_questions':n})
     except Exception: return jsonify({'status':'error'}),500
 
 if __name__=='__main__': app.run(host='0.0.0.0',port=PORT,debug=False)
